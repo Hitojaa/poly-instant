@@ -72,8 +72,10 @@ class CopyTrader:
         for market in markets:
             slug = market.get("slug", "")
             question = market.get("question", "?")
-            tokens = market.get("tokens", [])
-            if len(tokens) != 2:
+
+            from .client import PolymarketClient as _PC
+            yes_price, no_price, _, _ = _PC.extract_prices(market)
+            if yes_price is None:
                 continue
 
             # Checker le flow smart money pour ce marche
@@ -85,8 +87,8 @@ class CopyTrader:
             positions.append({
                 "slug": slug,
                 "question": question,
-                "yes_price": float(tokens[0].get("price", 0)),
-                "no_price": float(tokens[1].get("price", 0)),
+                "yes_price": yes_price,
+                "no_price": no_price,
                 "smart_wallets": sm["wallets"],
                 "smart_trades": sm["trades"],
                 "smart_bias": sm["bias"],
@@ -107,8 +109,8 @@ class CopyTrader:
                     "smart_wallets": sm["wallets"],
                     "conviction": sm["conviction"],
                     "volume": sm["total_volume"],
-                    "yes_price": float(tokens[0].get("price", 0)),
-                    "no_price": float(tokens[1].get("price", 0)),
+                    "yes_price": yes_price,
+                    "no_price": no_price,
                     "timestamp": datetime.utcnow().isoformat(),
                 }
 

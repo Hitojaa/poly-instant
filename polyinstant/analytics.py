@@ -524,20 +524,17 @@ class AdvancedAnalytics:
         Analyse complete et approfondie d'un marche.
         Combine toutes les metriques en un rapport unifie.
         """
-        tokens = market.get("tokens", [])
-        if len(tokens) != 2:
+        from .client import PolymarketClient as _PC
+        yes_price, no_price, yes_token_id, no_token_id = _PC.extract_prices(market)
+        if yes_price is None:
             return None
 
-        yes_token = tokens[0]
-        no_token = tokens[1]
-        yes_price = float(yes_token.get("price", 0))
-        no_price = float(no_token.get("price", 0))
-        volume_24h = float(market.get("volume24hr", 0) or 0)
+        volume_24h = float(market.get("volume24hr", 0) or market.get("volume", 0) or 0)
         liquidity = float(market.get("liquidity", 0) or 0)
 
         # Orderbooks
-        yes_book = self._safe_get_book(yes_token.get("token_id", ""))
-        no_book = self._safe_get_book(no_token.get("token_id", ""))
+        yes_book = self._safe_get_book(yes_token_id)
+        no_book = self._safe_get_book(no_token_id)
 
         # Book spreads
         yes_spread = self._book_spread(yes_book)

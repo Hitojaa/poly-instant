@@ -2,6 +2,7 @@
 
 import requests
 import time
+import sys
 
 
 class PolymarketClient:
@@ -14,20 +15,36 @@ class PolymarketClient:
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "application/json",
-            "User-Agent": "poly-instant/0.1",
+            "User-Agent": "poly-instant/0.2",
         })
 
     def _get(self, url, params=None, retries=3):
         """GET with basic retry logic."""
         for attempt in range(retries):
             try:
-                resp = self.session.get(url, params=params, timeout=10)
+                resp = self.session.get(url, params=params, timeout=15)
                 resp.raise_for_status()
                 return resp.json()
             except requests.RequestException as e:
                 if attempt == retries - 1:
                     raise
                 time.sleep(2 ** attempt)
+
+    @staticmethod
+    def _extract_list(data, key=None):
+        """Extrait une liste depuis la reponse API (gere list ou dict)."""
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            # Essayer les cles courantes
+            for k in (key, "data", "markets", "events", "results", "items"):
+                if k and k in data and isinstance(data[k], list):
+                    return data[k]
+            # Si le dict a une seule cle qui contient une liste
+            for v in data.values():
+                if isinstance(v, list):
+                    return v
+        return []
 
     # -- Gamma API (market metadata) --
 
@@ -37,17 +54,93 @@ class PolymarketClient:
             "limit": limit,
             "active": str(active).lower(),
             "closed": str(closed).lower(),
+            "archived": "false",
         }
-        return self._get(f"{self.GAMMA_URL}/markets", params=params)
+        try:
+            data = self._get(f"{self.GAMMA_URL}/markets", params=params)
+            markets = self._extract_list(data, "markets")
+            if markets:
+                return markets
+        except Exception as e:
+            print(f"[debug] /markets failed: {e}", file=sys.stderr)
+
+        # Fallback: essayer via /events (recommande par Polymarket)
+        return self._get_markets_via_events(limit=limit, active=active, closed=closed)
+
+    def _get_markets_via_events(self, limit=50, active=True, closed=False):
+        """Fallback : recupere les marches via l'endpoint /events."""
+        params = {
+            "limit": min(limit, 50),
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "archived": "false",
+            "order": "volume24hr",
+            "ascending": "false",
+        }
+        try:
+            data = self._get(f"{self.GAMMA_URL}/events", params=params)
+            events = self._extract_list(data, "events")
+
+            markets = []
+            for event in events:
+                # Chaque event contient ses marches
+                event_markets = event.get("markets", [])
+                if isinstance(event_markets, list):
+                    for m in event_markets:
+                        # Enrichir le marche avec les infos de l'event si manquantes
+                        if not m.get("slug") and event.get("slug"):
+                            m["slug"] = event["slug"]
+                        markets.append(m)
+                else:
+                    # L'event lui-meme est un marche (events a 1 seul outcome)
+                    markets.append(event)
+
+            return markets[:limit]
+        except Exception as e:
+            print(f"[debug] /events fallback failed: {e}", file=sys.stderr)
+            return []
+
+    def get_events(self, limit=50, active=True, closed=False):
+        """Fetch events from Gamma API."""
+        params = {
+            "limit": limit,
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "archived": "false",
+        }
+        data = self._get(f"{self.GAMMA_URL}/events", params=params)
+        return self._extract_list(data, "events")
 
     def get_market(self, condition_id):
         """Fetch a single market by condition ID."""
-        return self._get(f"{self.GAMMA_URL}/markets/{condition_id}")
+        data = self._get(f"{self.GAMMA_URL}/markets/{condition_id}")
+        # Peut retourner un seul objet ou une liste
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data
 
     def search_markets(self, query, limit=20):
         """Search markets by keyword."""
         params = {"query": query, "limit": limit}
-        return self._get(f"{self.GAMMA_URL}/markets", params=params)
+        try:
+            data = self._get(f"{self.GAMMA_URL}/markets", params=params)
+            return self._extract_list(data, "markets")
+        except Exception:
+            # Fallback : chercher via events
+            try:
+                params_ev = {"tag": query, "limit": limit, "active": "true"}
+                data = self._get(f"{self.GAMMA_URL}/events", params=params_ev)
+                events = self._extract_list(data, "events")
+                markets = []
+                for event in events:
+                    event_markets = event.get("markets", [])
+                    if isinstance(event_markets, list):
+                        markets.extend(event_markets)
+                    else:
+                        markets.append(event)
+                return markets[:limit]
+            except Exception:
+                return []
 
     # -- CLOB API (order book / prices) --
 
@@ -62,3 +155,81 @@ class PolymarketClient:
     def get_midpoint(self, token_id):
         """Get midpoint price for a token."""
         return self._get(f"{self.CLOB_URL}/midpoint", params={"token_id": token_id})
+
+    # -- Utility --
+
+    @staticmethod
+    def extract_prices(market):
+        """
+        Extrait yes_price, no_price et token IDs depuis un objet marche.
+        Gere les differents formats de l'API Gamma :
+        - Format tokens: [{"outcome":"Yes","price":"0.65","token_id":"xxx"}, ...]
+        - Format outcomePrices: "0.65,0.35" ou ["0.65","0.35"]
+        - Format clobTokenIds: "id1,id2" ou ["id1","id2"]
+        Retourne (yes_price, no_price, yes_token_id, no_token_id) ou (None, None, "", "")
+        """
+        yes_price = None
+        no_price = None
+        yes_token_id = ""
+        no_token_id = ""
+
+        # Methode 1 : tokens array (format classique)
+        tokens = market.get("tokens", [])
+        if isinstance(tokens, list) and len(tokens) >= 2:
+            try:
+                yes_price = float(tokens[0].get("price", 0))
+                no_price = float(tokens[1].get("price", 0))
+                yes_token_id = tokens[0].get("token_id", "")
+                no_token_id = tokens[1].get("token_id", "")
+                if yes_price > 0 or no_price > 0:
+                    return yes_price, no_price, yes_token_id, no_token_id
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+        # Methode 2 : outcomePrices string ou list (format events)
+        outcome_prices = market.get("outcomePrices", "")
+        if outcome_prices:
+            try:
+                if isinstance(outcome_prices, str):
+                    parts = outcome_prices.replace("[", "").replace("]", "").replace('"', '').split(",")
+                elif isinstance(outcome_prices, list):
+                    parts = outcome_prices
+                else:
+                    parts = []
+
+                if len(parts) >= 2:
+                    yes_price = float(str(parts[0]).strip())
+                    no_price = float(str(parts[1]).strip())
+            except (ValueError, TypeError):
+                pass
+
+        # Methode 3 : bestBid / prix direct
+        if yes_price is None:
+            if market.get("bestBid") is not None:
+                try:
+                    yes_price = float(market["bestBid"])
+                    no_price = 1.0 - yes_price
+                except (ValueError, TypeError):
+                    pass
+
+        # Token IDs depuis clobTokenIds
+        if not yes_token_id:
+            clob_ids = market.get("clobTokenIds", "")
+            if clob_ids:
+                try:
+                    if isinstance(clob_ids, str):
+                        id_parts = clob_ids.replace("[", "").replace("]", "").replace('"', '').split(",")
+                    elif isinstance(clob_ids, list):
+                        id_parts = clob_ids
+                    else:
+                        id_parts = []
+                    if len(id_parts) >= 2:
+                        yes_token_id = str(id_parts[0]).strip()
+                        no_token_id = str(id_parts[1]).strip()
+                except (ValueError, TypeError):
+                    pass
+
+        if yes_price is not None and no_price is not None:
+            return yes_price, no_price, yes_token_id, no_token_id
+
+        return None, None, "", ""

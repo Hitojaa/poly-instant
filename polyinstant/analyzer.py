@@ -22,18 +22,14 @@ class MarketAnalyzer:
         if not market:
             return None
 
-        tokens = market.get("tokens", [])
-        if len(tokens) != 2:
+        from .client import PolymarketClient as _PC
+        yes_price, no_price, yes_token_id, no_token_id = _PC.extract_prices(market)
+        if yes_price is None:
             return {"error": "Marche non binaire, pas supporte pour l'instant"}
 
-        yes_token = tokens[0]
-        no_token = tokens[1]
-        yes_price = float(yes_token.get("price", 0))
-        no_price = float(no_token.get("price", 0))
-
         # Orderbook analysis
-        yes_book = self._analyze_book(yes_token.get("token_id", ""))
-        no_book = self._analyze_book(no_token.get("token_id", ""))
+        yes_book = self._analyze_book(yes_token_id)
+        no_book = self._analyze_book(no_token_id)
 
         return {
             "question": market.get("question", "?"),

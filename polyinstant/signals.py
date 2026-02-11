@@ -67,17 +67,15 @@ class SignalEngine:
         # 3. Analyse de chaque marche
         analyses = []
         for market in markets:
-            tokens = market.get("tokens", [])
-            if len(tokens) != 2:
-                continue
-
             slug = market.get("slug", "")
             question = market.get("question", "?")
 
             try:
-                yes_price = float(tokens[0].get("price", 0))
-                no_price = float(tokens[1].get("price", 0))
-                volume = float(market.get("volume24hr", 0) or 0)
+                from .client import PolymarketClient as _PC
+                yes_price, no_price, _, _ = _PC.extract_prices(market)
+                if yes_price is None:
+                    continue
+                volume = float(market.get("volume24hr", 0) or market.get("volume", 0) or 0)
                 liquidity = float(market.get("liquidity", 0) or 0)
             except (ValueError, TypeError):
                 continue

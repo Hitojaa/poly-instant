@@ -123,12 +123,13 @@ def cmd_markets(args):
         markets = client.get_markets(limit=limit)
         rows = []
         for m in markets:
-            tokens = m.get("tokens", [])
-            yes_p = float(tokens[0].get("price", 0)) if tokens else 0
+            yes_p, no_p, _, _ = PolymarketClient.extract_prices(m)
+            if yes_p is None:
+                continue
             rows.append([
                 m.get("question", "?")[:60],
                 f"{yes_p:.2f}",
-                f"${float(m.get('volume24hr', 0) or 0):,.0f}",
+                f"${float(m.get('volume24hr', 0) or m.get('volume', 0) or 0):,.0f}",
                 f"${float(m.get('liquidity', 0) or 0):,.0f}",
             ])
         print(tabulate(rows, headers=["Marche", "YES", "Vol 24h", "Liquidity"]))
@@ -418,17 +419,17 @@ def cmd_top(args):
 
     valid = []
     for m in markets:
-        tokens = m.get("tokens", [])
-        if len(tokens) == 2:
-            vol = float(m.get("volume24hr", 0) or 0)
+        yp, np, _, _ = PolymarketClient.extract_prices(m)
+        if yp is not None:
+            vol = float(m.get("volume24hr", 0) or m.get("volume", 0) or 0)
             valid.append((vol, m))
     valid.sort(key=lambda x: x[0], reverse=True)
 
     rows = []
     for vol, market in valid[:limit]:
-        tokens = market.get("tokens", [])
-        yes_price = float(tokens[0].get("price", 0))
-        no_price = float(tokens[1].get("price", 0))
+        yes_price, no_price, _, _ = PolymarketClient.extract_prices(market)
+        if yes_price is None:
+            continue
         total = yes_price + no_price
         liquidity = float(market.get("liquidity", 0) or 0)
 
