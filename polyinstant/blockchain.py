@@ -4,9 +4,12 @@ import requests
 import time
 import hashlib
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
+
+from .client import PolymarketClient
 
 
 class PolygonClient:
@@ -196,7 +199,22 @@ class PolygonClient:
 
         try:
             result = self._get(f"{self.CLOB_URL}/trades", params=params)
-            trades = result if isinstance(result, list) else result.get("trades", result.get("data", []))
+            if isinstance(result, list):
+                trades = result
+            elif isinstance(result, dict):
+                # Essayer toutes les cles courantes
+                trades = (result.get("trades") or result.get("data") or
+                          result.get("results") or result.get("items") or [])
+                if not isinstance(trades, list):
+                    # Si une seule valeur est une liste, la prendre
+                    for v in result.values():
+                        if isinstance(v, list):
+                            trades = v
+                            break
+                    else:
+                        trades = []
+            else:
+                trades = []
             self._set_cache(cache_key, trades)
             return trades
         except Exception:
@@ -228,6 +246,7 @@ class PolygonClient:
         """
         Recupere les marches recemment resolus.
         Crucial pour calculer le win rate des wallets.
+        Essaie /markets puis fallback sur /events.
         """
         params = {
             "limit": limit,
@@ -235,33 +254,61 @@ class PolygonClient:
             "order": "endDate",
             "ascending": "false",
         }
+        # Essai 1 : /markets
         try:
-            return self._get(f"{self.GAMMA_URL}/markets", params=params)
-        except Exception:
+            data = self._get(f"{self.GAMMA_URL}/markets", params=params)
+            markets = PolymarketClient._extract_list(data, "markets")
+            if markets:
+                return markets
+        except Exception as e:
+            print(f"[debug] resolved /markets failed: {e}", file=sys.stderr)
+
+        # Essai 2 : /events fallback
+        try:
+            params_ev = {
+                "limit": min(limit, 50),
+                "closed": "true",
+                "archived": "false",
+                "order": "endDate",
+                "ascending": "false",
+            }
+            data = self._get(f"{self.GAMMA_URL}/events", params=params_ev)
+            events = PolymarketClient._extract_list(data, "events")
+            markets = []
+            for event in events:
+                event_markets = event.get("markets", [])
+                if isinstance(event_markets, list):
+                    for m in event_markets:
+                        if not m.get("slug") and event.get("slug"):
+                            m["slug"] = event["slug"]
+                        markets.append(m)
+                else:
+                    markets.append(event)
+            return markets[:limit]
+        except Exception as e:
+            print(f"[debug] resolved /events fallback failed: {e}", file=sys.stderr)
             return []
 
     def get_market_resolution(self, market):
         """
         Determine le resultat d'un marche resolu.
         Retourne 'YES', 'NO', ou None si pas encore resolu.
+        Utilise extract_prices() pour gerer tous les formats API.
         """
-        tokens = market.get("tokens", [])
-        if len(tokens) != 2:
-            return None
-
-        # Un marche resolu a un token a prix 1.0 et l'autre a 0.0
-        yes_price = float(tokens[0].get("price", 0.5))
-        no_price = float(tokens[1].get("price", 0.5))
-
-        if yes_price >= 0.95:
-            return "YES"
-        elif no_price >= 0.95:
-            return "NO"
-
-        # Verifier via le champ outcome si disponible
+        # Verifier d'abord via le champ outcome/resolution (le plus fiable)
         outcome = market.get("outcome", market.get("resolution", ""))
         if outcome:
-            return outcome.upper() if outcome.upper() in ("YES", "NO") else None
+            up = outcome.upper().strip()
+            if up in ("YES", "NO"):
+                return up
+
+        # Sinon verifier via les prix (un marche resolu = 1.0 / 0.0)
+        yes_price, no_price, _, _ = PolymarketClient.extract_prices(market)
+        if yes_price is not None and no_price is not None:
+            if yes_price >= 0.95:
+                return "YES"
+            elif no_price >= 0.95:
+                return "NO"
 
         return None
 
@@ -273,18 +320,40 @@ class PolygonClient:
         """
         Collecte TOUS les trades pour un marche (pagine).
         Retourne une liste de trades avec maker/taker addresses.
+        Utilise extract_prices() pour gerer tous les formats API.
         """
-        tokens = market.get("tokens", [])
-        if len(tokens) != 2:
+        yes_price, no_price, yes_token_id, no_token_id = PolymarketClient.extract_prices(market)
+
+        # Collecter les token IDs a interroger
+        token_pairs = []
+        if yes_token_id:
+            token_pairs.append((yes_token_id, "YES"))
+        if no_token_id:
+            token_pairs.append((no_token_id, "NO"))
+
+        # Fallback : essayer les tokens array classique aussi
+        if not token_pairs:
+            tokens = market.get("tokens", [])
+            if isinstance(tokens, list):
+                for t in tokens:
+                    tid = t.get("token_id", "")
+                    outcome = t.get("outcome", "Unknown")
+                    if tid:
+                        token_pairs.append((tid, outcome))
+
+        if not token_pairs:
+            # Dernier recours : essayer via condition_id
+            condition_id = market.get("conditionId", market.get("condition_id", ""))
+            if condition_id:
+                trades = self.get_market_trades(condition_id, limit=500)
+                for trade in trades:
+                    trade["_outcome"] = trade.get("side", "Unknown").upper()
+                    trade["_token_id"] = trade.get("asset_id", "")
+                return trades
             return []
 
         all_trades = []
-        for token in tokens:
-            token_id = token.get("token_id", "")
-            if not token_id:
-                continue
-
-            outcome = token.get("outcome", "Unknown")
+        for token_id, outcome in token_pairs:
             page_trades = self.get_trades(token_id=token_id, limit=500)
             for trade in page_trades:
                 trade["_outcome"] = outcome

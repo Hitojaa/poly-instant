@@ -149,31 +149,46 @@ class WalletTracker:
         4. Stocke en DB
         """
         resolved = self.chain.get_resolved_markets(limit=limit)
+        print(f"  [debug] Marches resolus recuperes: {len(resolved)}", flush=True)
         conn = self._conn()
         c = conn.cursor()
         indexed_count = 0
+        markets_skipped_no_res = 0
+        markets_skipped_dup = 0
+        markets_skipped_no_trades = 0
         wallet_updates = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0, "volume": 0, "trades": 0})
 
-        for market in resolved:
-            slug = market.get("slug", "")
-            question = market.get("question", "?")
-            condition_id = market.get("conditionId", "")
-            end_date_str = market.get("endDate", "")
+        for i, market in enumerate(resolved):
+            slug = market.get("slug", market.get("market_slug", ""))
+            question = market.get("question", market.get("title", "?"))
+            condition_id = market.get("conditionId", market.get("condition_id", ""))
+            end_date_str = market.get("endDate", market.get("end_date", market.get("endDateIso", "")))
 
             # Determiner le resultat
             resolution = self.chain.get_market_resolution(market)
             if not resolution:
+                markets_skipped_no_res += 1
+                if i < 3:
+                    print(f"  [debug] Marche sans resolution: {slug[:50]} keys={list(market.keys())[:8]}", flush=True)
                 continue
 
             # Verifier si deja indexe
-            c.execute("SELECT COUNT(*) FROM wallet_trades WHERE market_slug=? AND market_resolved=1", (slug,))
-            if c.fetchone()[0] > 0:
-                continue  # Deja indexe
+            if slug:
+                c.execute("SELECT COUNT(*) FROM wallet_trades WHERE market_slug=? AND market_resolved=1", (slug,))
+                if c.fetchone()[0] > 0:
+                    markets_skipped_dup += 1
+                    continue  # Deja indexe
 
             # Collecter les trades
             trades = self.chain.collect_all_trades_for_market(market)
             if not trades:
+                markets_skipped_no_trades += 1
+                if i < 5:
+                    print(f"  [debug] Pas de trades: {slug[:40]} cond={condition_id[:20] if condition_id else 'N/A'}", flush=True)
                 continue
+
+            if i < 3:
+                print(f"  [debug] Marche OK: {slug[:40]} res={resolution} trades={len(trades)}", flush=True)
 
             # Parser end_date pour calculer le timing
             end_date = None
@@ -281,8 +296,12 @@ class WalletTracker:
         conn.commit()
         conn.close()
 
+        print(f"  [debug] Resume: resolus={len(resolved)} skip_no_res={markets_skipped_no_res} "
+              f"skip_dup={markets_skipped_dup} skip_no_trades={markets_skipped_no_trades} "
+              f"indexed={indexed_count}", flush=True)
+
         return {
-            "markets_indexed": len([m for m in resolved if self.chain.get_market_resolution(m)]),
+            "markets_indexed": indexed_count > 0 and len(resolved) - markets_skipped_no_res - markets_skipped_dup or 0,
             "trades_indexed": indexed_count,
             "wallets_updated": len(wallet_updates),
         }
