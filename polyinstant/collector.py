@@ -158,67 +158,6 @@ class DataCollector:
         conn.close()
         return count
 
-    @staticmethod
-    def _extract_prices(market):
-        """
-        Extrait yes_price, no_price et token IDs depuis un objet marche.
-        Gere les differents formats de l'API Gamma :
-        - Format tokens: [{"outcome":"Yes","price":"0.65","token_id":"xxx"}, ...]
-        - Format outcomePrices: "0.65,0.35" avec outcomes: "Yes,No"
-        - Format clobTokenIds: "id1,id2"
-        """
-        yes_price = None
-        no_price = None
-        yes_token_id = ""
-        no_token_id = ""
-
-        # Methode 1 : tokens array (format classique)
-        tokens = market.get("tokens", [])
-        if isinstance(tokens, list) and len(tokens) >= 2:
-            yes_price = float(tokens[0].get("price", 0))
-            no_price = float(tokens[1].get("price", 0))
-            yes_token_id = tokens[0].get("token_id", "")
-            no_token_id = tokens[1].get("token_id", "")
-            return yes_price, no_price, yes_token_id, no_token_id
-
-        # Methode 2 : outcomePrices string (format events)
-        outcome_prices = market.get("outcomePrices", "")
-        if outcome_prices:
-            if isinstance(outcome_prices, str):
-                parts = outcome_prices.replace("[", "").replace("]", "").replace('"', '').split(",")
-            elif isinstance(outcome_prices, list):
-                parts = outcome_prices
-            else:
-                parts = []
-
-            if len(parts) >= 2:
-                yes_price = float(parts[0].strip())
-                no_price = float(parts[1].strip())
-
-        # Methode 3 : champs best_bid/best_ask ou price directement
-        if yes_price is None:
-            if market.get("bestBid") is not None:
-                yes_price = float(market.get("bestBid", 0))
-                no_price = 1.0 - yes_price
-
-        # Token IDs
-        clob_ids = market.get("clobTokenIds", "")
-        if clob_ids:
-            if isinstance(clob_ids, str):
-                id_parts = clob_ids.replace("[", "").replace("]", "").replace('"', '').split(",")
-            elif isinstance(clob_ids, list):
-                id_parts = clob_ids
-            else:
-                id_parts = []
-            if len(id_parts) >= 2:
-                yes_token_id = id_parts[0].strip()
-                no_token_id = id_parts[1].strip()
-
-        if yes_price is not None and no_price is not None:
-            return yes_price, no_price, yes_token_id, no_token_id
-
-        return None, None, "", ""
-
     def collect_orderbook(self, slug):
         """Collecte un snapshot d'orderbook pour un marche specifique."""
         conn = self._conn()

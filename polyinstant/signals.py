@@ -157,8 +157,11 @@ class SignalEngine:
             # Notifier les top signaux
             if self.notifier:
                 for sig in top_signals[:5]:
-                    self.notifier.alert_signal(sig)
-                    self.alerts_sent["signal"] += 1
+                    try:
+                        self.notifier.alert_signal(sig)
+                        self.alerts_sent["signal"] += 1
+                    except Exception:
+                        pass
 
         return report
 

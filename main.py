@@ -1022,7 +1022,7 @@ def main():
 ║                                                                       ║
 ║  CONFIG (.env) :                                                      ║
 ║  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  (notifications)               ║
-║  POLYGONSCAN_API_KEY  (analyse on-chain, gratuit sur polygonscan.com)  ║
+║  POLYGONSCAN_API_KEY  (analyse on-chain, gratuit sur etherscan.io)     ║
 ║                                                                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 """)

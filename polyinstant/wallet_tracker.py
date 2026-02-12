@@ -302,7 +302,7 @@ class WalletTracker:
               f"indexed={indexed_count}", flush=True)
 
         return {
-            "markets_indexed": indexed_count > 0 and len(resolved) - markets_skipped_no_res - markets_skipped_dup or 0,
+            "markets_indexed": len(resolved) - markets_skipped_no_res - markets_skipped_dup - markets_skipped_no_trades if indexed_count > 0 else 0,
             "trades_indexed": indexed_count,
             "wallets_updated": len(wallet_updates),
         }

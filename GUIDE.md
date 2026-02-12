@@ -8,19 +8,20 @@
 
 1. [Vue d'ensemble](#vue-densemble)
 2. [Installation](#installation)
-3. [Configuration](#configuration)
+3. [Configuration des APIs](#configuration-des-apis)
 4. [Architecture du code](#architecture-du-code)
 5. [Toutes les commandes](#toutes-les-commandes)
-6. [Guide d'utilisation pas a pas](#guide-dutilisation-pas-a-pas)
+6. [Guide pas a pas : du premier scan au copy trading](#guide-pas-a-pas)
 7. [Comment ca marche en detail](#comment-ca-marche-en-detail)
 8. [Combien de temps attendre avant de trader](#combien-de-temps-attendre)
-9. [FAQ](#faq)
+9. [Troubleshooting](#troubleshooting)
+10. [FAQ](#faq)
 
 ---
 
 ## Vue d'ensemble
 
-poly-instant est un outil d'intelligence pour Polymarket qui combine :
+poly-instant est un moteur d'intelligence pour Polymarket qui combine :
 
 - **Analyse de marche avancee** : Kelly Criterion, Expected Value, probabilites bayesiennes, momentum/RSI, detection de baleines, profil de volume
 - **Wallet Tracker** : indexe les trades on-chain, score les wallets par win rate/PnL/timing, identifie les smart wallets
@@ -30,14 +31,23 @@ poly-instant est un outil d'intelligence pour Polymarket qui combine :
 
 ### Ce que le programme fait concretement
 
-1. Il scanne les marches Polymarket en continu
-2. Il collecte les prix, orderbooks, et volumes dans une base SQLite
-3. Il analyse chaque marche avec des mathematiques poussees (Kelly, EV, Bayes, RSI...)
-4. Il indexe les trades des marches resolus pour identifier qui gagne
-5. Il score chaque wallet selon son win rate, timing, volume, PnL
-6. Il detecte les clusters de wallets suspects (sybil)
-7. Il genere des signaux de trading prioritises
-8. Il t'envoie des alertes Telegram en temps reel
+1. Scanne les marches Polymarket en continu via l'API Gamma + CLOB
+2. Collecte les prix, orderbooks et volumes dans une base SQLite locale
+3. Analyse chaque marche avec des maths poussees (Kelly, EV, Bayes, RSI...)
+4. Indexe les trades des marches resolus pour identifier qui gagne le plus
+5. Score chaque wallet : win rate, timing, volume, PnL, insider score
+6. Detecte les clusters de wallets suspects (sybil) et l'activite anormale
+7. Genere des signaux de trading prioritises avec niveau de confiance
+8. Envoie des alertes Telegram en temps reel
+
+### Sources de donnees
+
+| Source | Quoi | Cle requise |
+|--------|------|-------------|
+| Gamma API | Marches, prix, metadata, activite | Non (gratuit) |
+| CLOB API | Orderbooks, trades recents, spreads | Non (gratuit) |
+| Etherscan V2 | Trades on-chain historiques (ERC-1155) | Oui (gratuit) |
+| Telegram Bot | Envoi de notifications | Oui (gratuit) |
 
 ---
 
@@ -48,67 +58,75 @@ poly-instant est un outil d'intelligence pour Polymarket qui combine :
 git clone <repo-url>
 cd poly-instant
 
-# 2. Installer les dependances
+# 2. Creer un environnement virtuel (recommande)
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # Mac/Linux
+
+# 3. Installer les dependances
 pip install -r requirements.txt
 
-# 3. Copier et configurer le .env
+# 4. Copier et configurer le .env
 cp .env.example .env
-# Editer .env avec tes cles (voir section Configuration)
+# Editer .env avec tes cles (voir section suivante)
 
-# 4. Tester que ca marche
-python main.py
+# 5. Tester que ca marche
+python main.py markets
 ```
 
 ### Dependances
 
-- `requests` : appels API
-- `python-dotenv` : variables d'environnement
+- `requests` : appels API (Gamma, CLOB, Etherscan)
+- `python-dotenv` : variables d'environnement (.env)
 - `tabulate` : tableaux formattes en CLI
 - `pandas` : manipulation de donnees
-- `websocket-client` : connexion temps reel (futur)
 
 Tout est en **Python pur**, pas besoin de Node.js ou autre.
 
 ---
 
-## Configuration
+## Configuration des APIs
 
 ### Fichier `.env`
 
 ```bash
-# OBLIGATOIRE pour rien - la lecture de marche est gratuite
-# OPTIONNEL pour les notifications Telegram
+# === TELEGRAM (optionnel mais recommande) ===
 TELEGRAM_BOT_TOKEN=ton_token_ici
 TELEGRAM_CHAT_ID=ton_chat_id_ici
 
-# RECOMMANDE pour le wallet tracker (analyse on-chain)
-POLYGONSCAN_API_KEY=ta_cle_ici
+# === ETHERSCAN V2 (RECOMMANDE pour wallet tracker + on-chain) ===
+# Ta cle Etherscan marche pour Polygon (chainid=137)
+POLYGONSCAN_API_KEY=ta_cle_etherscan_ici
 
-# Config
+# === CONFIG ===
 SCAN_INTERVAL=60        # Intervalle de scan en secondes
 MIN_PROFIT_PCT=2.0      # Profit minimum pour les alertes d'arbitrage
 ```
 
-### Setup Telegram (5 minutes)
+### Setup Etherscan API V2 (2 minutes) - IMPORTANT
 
-1. Ouvre Telegram, cherche `@BotFather`
-2. Envoie `/newbot`
-3. Donne un nom a ton bot (ex: "PolyInstant Alerts")
-4. BotFather te donne un token -> copie-le dans `TELEGRAM_BOT_TOKEN`
-5. Envoie un message a ton bot (n'importe quoi)
-6. Va sur `https://api.telegram.org/bot<TON_TOKEN>/getUpdates`
-7. Cherche `"chat":{"id":XXXXXXX}` -> copie le nombre dans `TELEGRAM_CHAT_ID`
+Polygonscan utilise maintenant **Etherscan API V2**. Une seule cle marche pour Polygon + 60 autres chains.
 
-### Setup Polygonscan API (2 minutes)
+1. Va sur **https://etherscan.io** (PAS polygonscan.com)
+2. Cree un compte gratuit
+3. Va dans **My Account > API Keys > Add**
+4. Copie la cle dans `POLYGONSCAN_API_KEY` de ton `.env`
 
-1. Va sur https://polygonscan.com
-2. Cree un compte (gratuit)
-3. Va dans "API Keys" -> "Add"
-4. Copie la cle dans `POLYGONSCAN_API_KEY`
+**Pourquoi c'est important ?** Sans cette cle, le wallet tracker ne peut pas recuperer les trades historiques on-chain des marches resolus. L'indexation (`index`) a besoin de cette cle pour fonctionner a 100%.
 
 Le free tier donne 5 calls/sec, c'est largement suffisant.
 
-**Sans cle Polygonscan**, le wallet tracker fonctionne quand meme via l'API CLOB de Polymarket, mais avec moins de donnees historiques.
+### Setup Telegram (5 minutes) - optionnel
+
+1. Ouvre Telegram, cherche **@BotFather**
+2. Envoie `/newbot`
+3. Donne un nom a ton bot (ex: "PolyInstant Alerts")
+4. BotFather te donne un **token** -> copie-le dans `TELEGRAM_BOT_TOKEN`
+5. Envoie un message a ton bot (n'importe quoi, juste pour initier le chat)
+6. Va sur `https://api.telegram.org/bot<TON_TOKEN>/getUpdates`
+7. Cherche `"chat":{"id":XXXXXXX}` -> copie le nombre dans `TELEGRAM_CHAT_ID`
+
+**Sans Telegram**, tout fonctionne en CLI. Tu ne recevras juste pas de notifications push.
 
 ---
 
@@ -116,58 +134,73 @@ Le free tier donne 5 calls/sec, c'est largement suffisant.
 
 ```
 poly-instant/
-├── main.py                      # CLI - 16 commandes
-├── requirements.txt
-├── .env.example
+├── main.py                      # CLI principal - 16 commandes
+├── requirements.txt             # Dependances Python
+├── .env                         # Tes cles API (gitignore)
+├── .env.example                 # Template de config
 ├── GUIDE.md                     # Ce fichier
 ├── data/
-│   └── polymarket.db            # Base SQLite (creee automatiquement)
+│   └── polymarket.db            # Base SQLite (creee auto)
 └── polyinstant/
     ├── __init__.py
-    ├── client.py                # Client API Polymarket (Gamma + CLOB)
+    │
+    │   --- COUCHE API ---
+    ├── client.py                # Client Polymarket (Gamma + CLOB)
+    │                            #   extract_prices() : gere tous les formats API
+    │                            #   get_markets(), get_events(), search_markets()
+    │                            #   get_orderbook(), get_price(), get_midpoint()
+    │
+    ├── blockchain.py            # Client Etherscan V2 + on-chain
+    │                            #   3 strategies de collecte de trades :
+    │                            #   1. CLOB API (marches actifs)
+    │                            #   2. Gamma /activity (historique)
+    │                            #   3. On-chain ERC-1155 via Etherscan (permanent)
+    │                            #   get_resolved_markets(), get_market_resolution()
+    │                            #   get_onchain_trades_for_token()
+    │
+    │   --- COUCHE ANALYSE ---
+    ├── analytics.py             # Moteur mathematique avance
+    │                            #   Kelly Criterion, Expected Value
+    │                            #   Bayesian probability updates
+    │                            #   Momentum / RSI / Volatilite
+    │                            #   Detection de baleines
+    │                            #   Volume profile (POC, Value Area)
+    │                            #   Score d'efficience du marche
+    │                            #   MarketPredictor (prediction directionnelle)
+    │
     ├── scanner.py               # Scanner d'arbitrage et mispricing
     ├── analyzer.py              # Analyse basique d'un marche
-    ├── analytics.py             # MOTEUR MATHEMATIQUE
-    │                            #   - Kelly Criterion
-    │                            #   - Expected Value
-    │                            #   - Bayesian probability updates
-    │                            #   - Momentum / RSI / Volatilite
-    │                            #   - Detection de baleines
-    │                            #   - Volume profile (POC, Value Area)
-    │                            #   - Score d'efficience du marche
-    │                            #   - MarketPredictor (prediction directionnelle)
-    ├── collector.py             # Collecteur de donnees SQLite
-    │                            #   - Snapshots de prix en continu
-    │                            #   - Historique d'orderbook
-    │                            #   - Log d'evenements
+    │
+    │   --- COUCHE DONNEES ---
+    ├── collector.py             # Collecteur SQLite
+    │                            #   Snapshots de prix en continu
+    │                            #   Historique d'orderbook
+    │                            #   Log d'evenements
+    │
+    │   --- COUCHE INTELLIGENCE ---
+    ├── wallet_tracker.py        # Systeme de tracking de wallets
+    │                            #   Indexation des trades resolus
+    │                            #   Scoring multi-facteurs (8 metriques)
+    │                            #   Leaderboard, profils, watchlist
+    │
+    ├── smart_money.py           # Detection smart money
+    │                            #   Activite pre-resolution
+    │                            #   Clusters sybil (fenetre glissante)
+    │                            #   Activite anormale
+    │                            #   Analyse reseau de wallets
+    │                            #   Smart money flow par marche
+    │
+    ├── copy_trader.py           # Copy trading temps reel
+    │                            #   Monitoring de la watchlist
+    │                            #   Consensus smart money
+    │                            #   Alertes de trades
+    │
+    │   --- COUCHE NOTIFICATION ---
     ├── signals.py               # Moteur de signaux composite
-    │                            #   - Combine tous les indicateurs
-    │                            #   - Scoring et prioritisation
-    ├── notifier.py              # Alertes Telegram formatees
-    │                            #   - Arbitrage, signaux, baleines
-    │                            #   - Momentum, efficience, rapports
-    ├── blockchain.py            # Client Polygon/Polygonscan
-    │                            #   - Transactions on-chain
-    │                            #   - Trades CLOB (maker/taker)
-    │                            #   - Marches resolus
-    │                            #   - Token transfers ERC-1155
-    ├── wallet_tracker.py        # SYSTEME DE TRACKING DE WALLETS
-    │                            #   - Indexation des trades
-    │                            #   - Scoring multi-facteurs
-    │                            #   - Leaderboard
-    │                            #   - Profils detailles
-    │                            #   - Watchlist
-    ├── smart_money.py           # DETECTION SMART MONEY
-    │                            #   - Activite pre-resolution
-    │                            #   - Clusters sybil
-    │                            #   - Activite anormale
-    │                            #   - Analyse reseau de wallets
-    │                            #   - Smart money flow par marche
-    └── copy_trader.py           # COPY TRADING EN TEMPS REEL
-                                 #   - Monitoring de la watchlist
-                                 #   - Consensus smart money
-                                 #   - Alertes de trades
-                                 #   - Rapport complet
+    │                            #   Combine tous les indicateurs
+    │                            #   Scoring et prioritisation
+    │
+    └── notifier.py              # Alertes Telegram formatees
 ```
 
 ### Base de donnees SQLite
@@ -181,9 +214,11 @@ La DB est creee automatiquement dans `data/polymarket.db`. Tables :
 | `events` | Evenements detectes (baleines, momentum...) |
 | `market_meta` | Metadata des marches suivis |
 | `wallets` | Profil de chaque wallet indexe |
-| `wallet_trades` | Historique trade par trade |
-| `wallet_scores` | Scores calcules (composite, insider...) |
+| `wallet_trades` | Historique trade par trade, win/loss, PnL |
+| `wallet_scores` | Scores calcules (composite, insider, timing...) |
 | `tracked_wallets` | Watchlist de wallets a suivre |
+
+**Pour reset** : supprime `data/polymarket.db` et relance.
 
 ---
 
@@ -205,7 +240,7 @@ La DB est creee automatiquement dans `data/polymarket.db`. Tables :
 | `python main.py analyze <slug>` | Analyse complete : Kelly, EV, Bayes, whales, momentum, smart money flow |
 | `python main.py signals` | Genere les signaux de trading (one-shot) |
 
-### Monitoring
+### Monitoring Continu
 
 | Commande | Description |
 |----------|-------------|
@@ -217,7 +252,7 @@ La DB est creee automatiquement dans `data/polymarket.db`. Tables :
 
 | Commande | Description |
 |----------|-------------|
-| `python main.py index [limit]` | Indexe les wallets depuis les marches resolus |
+| `python main.py index [limit]` | **Indexe les wallets depuis les marches resolus** |
 | `python main.py leaderboard [n] [tri]` | Classement des meilleurs wallets |
 | `python main.py wallet <address>` | Profil complet d'un wallet |
 | `python main.py network <address>` | Analyse reseau (co-traders, sybil) |
@@ -236,39 +271,53 @@ La DB est creee automatiquement dans `data/polymarket.db`. Tables :
 | `python main.py smartmoney flow <slug>` | Smart money flow sur un marche |
 | `python main.py copytrade [sec]` | Copy-trading en temps reel |
 
+### Tris disponibles pour `leaderboard`
+
+| Tri | Description |
+|-----|-------------|
+| `composite_score` | Score global (defaut) |
+| `win_rate` | Taux de reussite brut |
+| `total_pnl` | Profit/Perte total |
+| `insider_score` | Score d'insider (timing + win rate + volume) |
+| `sharpe_ratio` | Ratio de Sharpe (rendement ajuste au risque) |
+
 ---
 
-## Guide d'utilisation pas a pas
+## Guide pas a pas
 
-### Etape 1 : Premier lancement (5 min)
+### Etape 1 : Premier lancement (immediat, pas de cle requise)
 
 ```bash
 # Voir les marches actifs
 python main.py markets
 
 # Voir les top marches par volume
-python main.py top
+python main.py top 20
 
 # Scanner les arbitrages
 python main.py scan
 ```
 
-### Etape 2 : Analyser un marche (immediat)
+Ces commandes marchent immediatement sans aucune configuration. Elles utilisent l'API Polymarket gratuite.
+
+### Etape 2 : Analyser un marche en profondeur (immediat)
 
 ```bash
-# Copie le slug d'un marche depuis Polymarket (dans l'URL)
+# Copie le slug d'un marche depuis l'URL Polymarket
+# Ex: polymarket.com/event/will-trump-win-2028 -> slug = will-trump-win-2028
 python main.py analyze will-trump-win-2028
 ```
 
-Ca te donne :
-- Prix et spread
-- Probabilite bayesienne ajustee
-- Kelly Criterion (combien miser)
-- Expected Value
-- Score d'efficience
-- Volume profile avec supports/resistances
-- Detection de baleines
-- Smart money flow (si DB indexee)
+L'analyse te donne :
+- **Prix et spread** - YES/NO, cout total, spread bid/ask
+- **Probabilite bayesienne** - ajustee par volume, liquidite, momentum
+- **Kelly Criterion** - combien miser (full/half/quarter kelly)
+- **Expected Value** - EV absolue, ROI potentiel, breakeven
+- **Efficience** - est-ce que le marche est correctement price ?
+- **Volume profile** - supports/resistances, POC, pression achat/vente
+- **Baleines** - gros ordres detectes, biais directionnel
+- **Smart money flow** - direction des smart wallets (si DB indexee)
+- **Prediction** - direction et confiance aggregees
 
 ### Etape 3 : Lancer le monitoring (laisser tourner)
 
@@ -276,91 +325,116 @@ Ca te donne :
 # Scan toutes les 60 secondes (defaut)
 python main.py monitor
 
-# Scan toutes les 30 secondes (plus rapide)
+# Scan toutes les 30 secondes (plus reactif)
 python main.py monitor 30
 ```
 
-**Laisse tourner en arriere-plan.** Plus ca tourne longtemps :
-- Plus l'historique de prix est riche
-- Plus les signaux de momentum sont precis
-- Plus les alertes sont pertinentes
+**Laisse tourner en arriere-plan.** Le monitoring :
+- Collecte les prix et orderbooks de 100 marches
+- Detecte les arbitrages, baleines, momentum
+- Envoie des alertes Telegram (si configure)
+- Stocke l'historique dans SQLite
 
-### Etape 4 : Construire la DB de wallets (10-30 min)
+Plus ca tourne longtemps, plus c'est precis :
+- **1h** = RSI basique, premieres alertes
+- **6h** = tendances fiables, momentum precis
+- **24h+** = patterns solides, alertes pertinentes
+
+### Etape 4 : Construire la DB de wallets (necessite cle Etherscan)
+
+C'est LA etape cle pour le smart money tracking. Elle indexe les trades des marches resolus pour identifier qui gagne.
 
 ```bash
-# Indexer 50 marches resolus recemment
-python main.py index 50
-
-# Indexer plus (plus de wallets, plus precis)
+# Indexer 100 marches resolus recemment
 python main.py index 100
 ```
 
-Ca va :
-1. Recuperer les marches resolus sur Polymarket
-2. Collecter tous les trades de ces marches
-3. Identifier quel wallet a achete quoi et quand
-4. Calculer win/loss et PnL pour chaque wallet
-5. Scorer chaque wallet (composite, insider, timing...)
-6. Marquer les "smart wallets" (score >= 70)
+**Ce qui se passe en coulisses :**
 
-**Relance regulierement** pour enrichir la DB avec de nouveaux marches.
+1. Recupere les 100 derniers marches resolus sur Polymarket (Gamma API)
+2. Pour chaque marche, determine le resultat (YES ou NO)
+3. Collecte tous les trades via 3 strategies :
+   - **CLOB API** : trades recents (marches encore actifs)
+   - **Gamma /activity** : historique d'activite par marche
+   - **Etherscan on-chain** : transferts ERC-1155 sur le CTF Exchange (permanent)
+4. Pour chaque trade, calcule win/loss et PnL
+5. Score chaque wallet (composite de 8 metriques)
+6. Marque les "smart wallets" (score >= 70/100)
+
+**Relance regulierement** pour enrichir la DB :
+```bash
+# Chaque jour ou quelques jours
+python main.py index 100
+```
+
+Le debug te montre la progression :
+```
+[debug] Marches resolus recuperes: 100
+[debug] Marche OK: will-trump-win res=YES trades=342 src=onchain
+[debug] Resume: resolus=100 skip_no_res=5 skip_dup=12 skip_no_trades=30 indexed=1847
+```
 
 ### Etape 5 : Explorer les wallets
 
 ```bash
-# Voir le leaderboard
+# Voir le leaderboard global
 python main.py leaderboard
 
-# Trier par win rate
+# Top 30 par win rate
 python main.py leaderboard 30 win_rate
 
-# Trier par insider score
+# Top par insider score (les plus suspects)
 python main.py leaderboard 30 insider_score
 
 # Profil detaille d'un wallet
-python main.py wallet 0x1234...
+python main.py wallet 0x1234abcd...
 
-# Voir son reseau
-python main.py network 0x1234...
+# Voir son reseau de wallets lies
+python main.py network 0x1234abcd...
 ```
 
 ### Etape 6 : Detection smart money
 
 ```bash
-# Scan complet
+# Scan complet (pre-resolution + sybil + abnormal)
 python main.py smartmoney
 
-# Qui a achete avant les resolutions ?
+# Qui a achete juste avant les resolutions ?
 python main.py smartmoney pre
-
-# Fenetre plus courte (30 min)
+# Fenetre de 30 minutes (plus strict)
 python main.py smartmoney pre 30
 
-# Clusters sybil
+# Clusters sybil (wallets coordonnes)
 python main.py smartmoney sybil
 
-# Activite anormale
+# Activite anormale des dernieres 24h
 python main.py smartmoney abnormal
 
-# Smart money sur un marche specifique
+# Smart money flow sur un marche specifique
 python main.py smartmoney flow will-trump-win-2028
 ```
 
 ### Etape 7 : Copy trading
 
 ```bash
-# Ajouter auto les meilleurs wallets a la watchlist
+# 1. Peupler la watchlist avec les meilleurs wallets
 python main.py watchlist auto
 
-# Ou ajouter manuellement
-python main.py watchlist add 0x1234... "Whale spotted"
+# Ou ajouter manuellement un wallet
+python main.py watchlist add 0x1234... "Whale spotted on BTC market"
 
-# Voir la watchlist
+# 2. Voir la watchlist
 python main.py watchlist
 
-# Lancer le copy-trading
+# 3. Lancer le copy-trading
 python main.py copytrade
 ```
+
+Le copy trader :
+- Surveille les positions des wallets de ta watchlist
+- Detecte quand 3+ smart wallets convergent sur le meme outcome
+- Envoie une notification Telegram "SMART MONEY CONSENSUS"
+- Re-scanne periodiquement pour de nouveaux trades
 
 ---
 
@@ -377,42 +451,65 @@ f* = (bp - q) / b
 - `q` = 1 - p
 - `f*` = fraction optimale de ton bankroll a miser
 
-On utilise le half-kelly (plus conservateur) par defaut.
+On utilise le **half-kelly** (plus conservateur) par defaut. Le quarter-kelly est recommande pour les debutants.
 
 #### Expected Value (EV)
 ```
 EV = (prob_win * payout_win) + (prob_lose * payout_lose) - cost
 ```
 Sur Polymarket : payout_win = 1.0 (moins 2% de frais), payout_lose = 0.
-Un trade avec EV > 0 est profitable en esperance.
+Un trade avec **EV > 0** est profitable en esperance mathematique.
 
 #### Bayesian Update
 Met a jour la probabilite du marche en fonction de :
 - Volume 24h (plus de volume = prix plus fiable)
 - Liquidite (plus liquide = moins manipulable)
-- Momentum du prix
-- Desequilibre du carnet d'ordres
+- Momentum du prix (tendance recente)
+- Desequilibre du carnet d'ordres (pression achat/vente)
 
 #### RSI (Relative Strength Index)
 ```
 RSI = 100 - (100 / (1 + RS))
 RS = moyenne des gains / moyenne des pertes
 ```
-- RSI > 70 = surachete (potentiel de baisse)
-- RSI < 30 = survendu (potentiel de hausse)
+- **RSI > 70** = surachete (potentiel de baisse, le prix est monte trop vite)
+- **RSI < 30** = survendu (potentiel de hausse, le prix est tombe trop vite)
 
-#### Sharpe Ratio (pour le scoring de wallets)
+#### Sharpe Ratio (scoring wallets)
 ```
-Sharpe = (rendement moyen) / (ecart-type des rendements)
+Sharpe = rendement_moyen / ecart_type_des_rendements
 ```
-Un Sharpe eleve = gains reguliers avec peu de variance = bon trader.
+Un Sharpe eleve = gains reguliers avec peu de variance = **bon trader consistant**.
 
-### Comment le wallet tracker detecte les insiders
+### Comment le wallet tracker score les wallets
 
-1. **Indexation** : On collecte TOUS les trades des marches resolus
-2. **Resolution mapping** : On sait quel outcome a gagne (YES ou NO)
-3. **Win/Loss tagging** : Chaque trade est marque win ou loss
-4. **Timing analysis** : On calcule le temps entre le trade et la resolution
+Chaque wallet recoit un **score composite de 0 a 100** base sur 8 metriques :
+
+| Metrique | Poids | Description |
+|----------|-------|-------------|
+| Win rate | 25% | Pourcentage de trades gagnants |
+| Sharpe ratio | 15% | Regularite des gains (ajuste au risque) |
+| Timing score | 20% | Combien de temps avant la resolution |
+| Consistency | 10% | Regularite a travers les marches |
+| Volume score | 10% | Taille des positions (log scale) |
+| Insider score | 20% | Composite timing + win rate + gros trades |
+
+#### Tiers de wallets
+
+| Tier | Score | Signification |
+|------|-------|---------------|
+| S - ELITE | >= 85 | Top performers, potentiels insiders |
+| A - SMART MONEY | >= 70 | Traders tres performants |
+| B - ABOVE AVERAGE | >= 55 | Au dessus de la moyenne |
+| C - AVERAGE | >= 40 | Trader moyen |
+| D - BELOW AVERAGE | < 40 | En dessous de la moyenne |
+
+### Comment la detection d'insiders fonctionne
+
+1. **Indexation** : on collecte TOUS les trades des marches resolus
+2. **Resolution mapping** : on sait quel outcome a gagne (YES ou NO)
+3. **Win/Loss tagging** : chaque trade est marque gagnant ou perdant
+4. **Timing analysis** : on calcule le temps entre le trade et la resolution
 5. **Scoring** :
    - Win rate > 70% avec > 10 trades = suspect
    - Timing moyen < 60 min avant resolution = tres suspect
@@ -421,72 +518,133 @@ Un Sharpe eleve = gains reguliers avec peu de variance = bon trader.
 
 ### Comment la detection sybil fonctionne
 
+Un sybil = une personne qui utilise plusieurs wallets pour manipuler.
+
 1. On prend tous les trades d'un marche
 2. On cherche les wallets qui achetent le **meme outcome**
-3. Dans une **fenetre de 5 minutes**
-4. Si **3+ wallets** achetent la meme chose en meme temps = cluster
+3. Dans une **fenetre de 5 minutes** (trades presque simultanes)
+4. Si **3+ wallets** achetent la meme chose en meme temps = **cluster detecte**
 5. On cherche les wallets qui apparaissent dans **plusieurs clusters** = recidiviste
 
 ### Comment le copy trading genere des signaux
 
-1. On prend la watchlist (wallets smart money)
-2. On regarde leurs positions actuelles
-3. Si **3+ smart wallets** sont sur le meme outcome avec > 60% de conviction :
-   - Signal "SMART MONEY CONSENSUS"
-   - Notification Telegram
+1. On prend la watchlist (tes wallets smart money)
+2. On regarde leurs positions actuelles sur les marches actifs
+3. Si **3+ smart wallets** sont sur le meme outcome avec **> 60% de conviction** :
+   - Signal **"SMART MONEY CONSENSUS"**
+   - Notification Telegram immediate
 4. Si un wallet de la watchlist fait un nouveau trade :
-   - Notification immediate
+   - Notification immediate avec details
+
+### Comment la collecte de trades on-chain fonctionne
+
+Les trades Polymarket passent par des smart contracts sur la blockchain Polygon :
+
+1. **NegRiskCtfExchange** (`0x4bFb41...`) - le contrat d'echange principal
+2. **Conditional Tokens** (`0x4D97DC...`) - les tokens ERC-1155 qui representent les positions
+
+Quand quelqu'un achete des shares YES :
+- Des tokens ERC-1155 sont transferes **du** contrat d'echange **vers** le wallet du trader
+- On detecte ca via Etherscan V2 API (`token1155tx`)
+
+Quand quelqu'un vend :
+- Les tokens sont transferes **vers** le contrat d'echange
+- On detecte aussi
+
+Avantage : les donnees on-chain sont **permanentes** et **completes**, contrairement au CLOB qui ne garde que les trades recents.
 
 ---
 
 ## Combien de temps attendre
 
-### Pour l'analyse de marche (analyze, signals, top)
-**Immediat.** Ces commandes appellent l'API Polymarket en temps reel.
+### Pour les commandes d'analyse (analyze, signals, top, markets)
+**Immediat.** Ces commandes appellent l'API Polymarket en temps reel. Aucune attente.
 
 ### Pour le momentum et les tendances
-**Minimum 1-2 heures de monitoring.** Le momentum a besoin de points de donnees historiques. Plus tu laisses `monitor` tourner, plus c'est precis :
-- 1h = RSI basique
-- 6h = tendances fiables
-- 24h+ = patterns solides
+**Minimum 1-2 heures de monitoring.** Plus c'est long, plus c'est precis :
+
+| Duree monitoring | Qualite |
+|-----------------|---------|
+| 30 min | Donnees de base, pas de RSI fiable |
+| 1-2h | RSI basique, premieres tendances |
+| 6h | Tendances fiables, momentum precis |
+| 24h+ | Patterns solides, signaux haute qualite |
 
 ### Pour le wallet tracker
-**10-30 minutes pour le premier index.** Ensuite :
-- Premier `index` = constitue la base
-- Relances regulieres = enrichit avec de nouveaux marches
-- Apres 3-4 sessions d'indexation = leaderboard significatif
+**10-30 minutes pour le premier `index`.** Ensuite :
+
+| Action | Temps | Resultat |
+|--------|-------|----------|
+| `index 50` | 5-10 min | Base initiale de wallets |
+| `index 100` | 10-20 min | Leaderboard significatif |
+| `index 200` | 20-40 min | Analyse approfondie |
+| 3-4 sessions d'index | Sur quelques jours | Database complete |
 
 ### Pour le copy trading
-**Fonctionne des que la watchlist est peuplee.** Le flow :
-1. `index 100` (20-30 min)
-2. `watchlist auto` (1 sec)
-3. `copytrade` (tourne en continu)
+**Fonctionne des que la watchlist est peuplee.**
 
-### Recommandation ideale
+### Setup complet recommande
+
 ```bash
-# Terminal 1 : monitoring continu (collecte + analyse)
+# Terminal 1 : monitoring continu (collecte + analyse + alertes)
 python main.py monitor 60
 
-# Terminal 2 (de temps en temps) : indexation de wallets
+# Terminal 2 (de temps en temps) : enrichir la DB de wallets
 python main.py index 100
 
-# Terminal 3 : copy trading
+# Terminal 3 : copy trading (quand la watchlist est prete)
 python main.py copytrade
 ```
+
+**Timeline realiste pour un setup complet :**
+
+1. **Jour 1** : `markets`, `top`, `analyze` pour explorer
+2. **Jour 1** : Lancer `monitor` en arriere-plan
+3. **Jour 1** : Premier `index 100` pour constituer la DB
+4. **Jour 2** : `leaderboard`, `smartmoney` pour analyser les wallets
+5. **Jour 2** : `watchlist auto` + `copytrade` pour commencer le suivi
+6. **Jour 3+** : Re-`index`, affiner la watchlist, profiter des alertes
+
+---
+
+## Troubleshooting
+
+### "0 marches resolus recuperes"
+- Verifie ta connexion internet
+- L'API Gamma peut etre temporairement down
+- Le code essaie automatiquement `/markets` puis `/events` en fallback
+
+### "0 trades indexes" (apres avoir recupere des marches)
+- **Verifie ta cle Etherscan** dans `.env` (`POLYGONSCAN_API_KEY=...`)
+- La cle doit etre generee sur **etherscan.io** (pas polygonscan.com)
+- Sans cle, seules les strategies CLOB et Gamma activity sont disponibles
+- Le CLOB ne garde pas les trades des marches fermes, donc la cle Etherscan est quasi-indispensable
+
+### "HTTPSConnectionPool... 403 Forbidden"
+- C'est un probleme de proxy/firewall, pas du code
+- Verifie que ton reseau permet les connexions vers `gamma-api.polymarket.com` et `api.etherscan.io`
+
+### "Aucun signal" ou "Pas assez d'historique"
+- Lance `monitor` et laisse tourner au moins 1-2 heures
+- Les signaux de momentum ont besoin de points de donnees historiques
+
+### La DB est corrompue ou bizarre
+- Supprime `data/polymarket.db` et relance
+- Tout sera recree automatiquement
 
 ---
 
 ## FAQ
 
 ### Ca coute quelque chose ?
-Non. Toutes les APIs utilisees sont gratuites :
+Non. Toutes les APIs sont gratuites :
 - Polymarket Gamma API : gratuit, pas de cle
 - Polymarket CLOB API : gratuit, pas de cle
-- Polygonscan API : gratuit (5 calls/sec)
+- Etherscan V2 API : gratuit (5 calls/sec en free tier)
 - Telegram Bot API : gratuit
 
 ### Le bot trade automatiquement ?
-Non. Le bot **detecte et alerte seulement**. C'est toi qui decides de trader ou non. L'execution automatique de trades n'est pas implementee (par choix de securite).
+**Non.** Le bot detecte et alerte seulement. C'est toi qui decides de trader. L'execution automatique de trades n'est pas implementee (choix de securite).
 
 ### C'est legal ?
 Oui. Tout est base sur des donnees publiques :
@@ -496,15 +654,27 @@ Oui. Tout est base sur des donnees publiques :
 
 ### Comment ameliorer la precision ?
 1. Laisse `monitor` tourner le plus longtemps possible
-2. Fais des `index` reguliers avec des limites elevees
-3. Ajoute une cle Polygonscan pour plus de donnees on-chain
+2. Fais des `index` reguliers avec des limites elevees (100-200)
+3. **Configure ta cle Etherscan** pour les donnees on-chain historiques
 4. Configure Telegram pour ne rien manquer
+5. Enrichis ta watchlist avec les wallets les plus performants
 
 ### Les donnees sont stockees ou ?
-Dans `data/polymarket.db` (SQLite local). Tu peux le supprimer pour recommencer a zero. Le fichier grossit avec le temps mais reste gerable (quelques centaines de Mo max).
+Dans `data/polymarket.db` (SQLite local). Le fichier grossit avec le temps mais reste gerable (quelques centaines de Mo max). Supprime-le pour recommencer a zero.
 
-### Ca marche sur Windows/Mac/Linux ?
-Oui, c'est du Python pur. `pip install -r requirements.txt` et c'est parti.
+### Ca marche sur Windows / Mac / Linux ?
+Oui, c'est du Python pur. `pip install -r requirements.txt` et c'est parti. Teste sur Windows (PowerShell) et Linux.
+
+### Quel est le slug d'un marche ?
+C'est la partie de l'URL Polymarket apres `/event/`. Exemple :
+- URL : `https://polymarket.com/event/will-trump-win-2028`
+- Slug : `will-trump-win-2028`
+
+### Difference entre `monitor` et `copytrade` ?
+- **`monitor`** : scanne TOUS les marches pour des signaux (arbitrage, baleines, momentum). C'est l'analyse de marche.
+- **`copytrade`** : surveille les WALLETS de ta watchlist. C'est le suivi de personnes.
+
+Les deux sont complementaires. Lance `monitor` dans un terminal et `copytrade` dans un autre.
 
 ---
 
@@ -512,16 +682,16 @@ Oui, c'est du Python pur. `pip install -r requirements.txt` et c'est parti.
 
 | Module | Lignes | Role |
 |--------|--------|------|
-| main.py | ~1000 | CLI et affichage |
+| main.py | ~1035 | CLI et affichage |
+| blockchain.py | ~600 | Client Etherscan V2 + on-chain |
+| wallet_tracker.py | ~775 | Tracking et scoring de wallets |
+| smart_money.py | ~500 | Detection smart money + sybil |
 | analytics.py | ~480 | Moteur mathematique |
-| wallet_tracker.py | ~500 | Tracking de wallets |
-| smart_money.py | ~500 | Detection smart money |
-| copy_trader.py | ~300 | Copy trading |
-| blockchain.py | ~280 | Client Polygon |
-| collector.py | ~310 | Collecteur SQLite |
-| notifier.py | ~200 | Alertes Telegram |
+| copy_trader.py | ~300 | Copy trading temps reel |
+| collector.py | ~250 | Collecteur SQLite |
 | signals.py | ~230 | Moteur de signaux |
-| scanner.py | ~100 | Scanner de base |
-| analyzer.py | ~80 | Analyseur de base |
-| client.py | ~65 | Client API |
-| **Total** | **~4000+** | |
+| notifier.py | ~200 | Alertes Telegram |
+| scanner.py | ~100 | Scanner arbitrage |
+| client.py | ~240 | Client API Polymarket |
+| analyzer.py | ~80 | Analyseur basique |
+| **Total** | **~4800+** | |
