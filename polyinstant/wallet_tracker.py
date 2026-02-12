@@ -188,7 +188,8 @@ class WalletTracker:
                 continue
 
             if i < 3:
-                print(f"  [debug] Marche OK: {slug[:40]} res={resolution} trades={len(trades)}", flush=True)
+                source = trades[0].get("_source", "clob") if trades else "?"
+                print(f"  [debug] Marche OK: {slug[:40]} res={resolution} trades={len(trades)} src={source}", flush=True)
 
             # Parser end_date pour calculer le timing
             end_date = None
