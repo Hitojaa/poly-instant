@@ -119,6 +119,47 @@ class PolymarketClient:
             return data[0] if data else None
         return data
 
+    def get_market_by_slug(self, slug):
+        """
+        Fetch a single market by slug.
+        Essaie d'abord le parametre slug exact, puis recherche texte.
+        """
+        # Essai 1 : requete par slug exact
+        try:
+            data = self._get(f"{self.GAMMA_URL}/markets", params={"slug": slug})
+            markets = self._extract_list(data, "markets")
+            if markets:
+                for m in markets:
+                    if m.get("slug") == slug:
+                        return m
+                return markets[0]
+        except Exception:
+            pass
+
+        # Essai 2 : requete par slug via /events
+        try:
+            data = self._get(f"{self.GAMMA_URL}/events", params={"slug": slug})
+            events = self._extract_list(data, "events")
+            for event in events:
+                event_markets = event.get("markets", [])
+                if isinstance(event_markets, list):
+                    for m in event_markets:
+                        if m.get("slug") == slug:
+                            return m
+                    if event_markets:
+                        return event_markets[0]
+                if event.get("slug") == slug:
+                    return event
+        except Exception:
+            pass
+
+        # Essai 3 : recherche texte comme fallback
+        results = self.search_markets(slug, limit=5)
+        for m in results:
+            if m.get("slug") == slug:
+                return m
+        return results[0] if results else None
+
     def search_markets(self, query, limit=20):
         """Search markets by keyword."""
         params = {"query": query, "limit": limit}

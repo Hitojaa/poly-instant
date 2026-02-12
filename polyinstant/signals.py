@@ -180,14 +180,7 @@ class SignalEngine:
         """
         Analyse approfondie d'un seul marche avec tous les indicateurs.
         """
-        markets = self.client.search_markets(slug, limit=5)
-        market = None
-        for m in markets:
-            if m.get("slug") == slug:
-                market = m
-                break
-        if not market and markets:
-            market = markets[0]
+        market = self.client.get_market_by_slug(slug)
         if not market:
             return None
 
