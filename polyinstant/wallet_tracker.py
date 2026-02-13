@@ -211,12 +211,18 @@ class WalletTracker:
                 except (ValueError, TypeError):
                     continue
 
-                if price <= 0 or size <= 0:
+                if size <= 0:
                     continue
 
                 outcome_bought = trade.get("_outcome", trade.get("side", ""))
-                total_cost = price * size
                 role = trade.get("_role", "unknown")
+                price_known = price > 0
+
+                # Si prix inconnu (trades on-chain), estimer a 0.50
+                if not price_known:
+                    price = 0.50
+
+                total_cost = price * size
 
                 # Determiner si le trade a gagne
                 won = False
@@ -407,10 +413,11 @@ class WalletTracker:
         total_pnl = sum(pnls)
         avg_pnl = total_pnl / total
 
-        # Win rate ponderee par volume
-        weighted_wins = sum(t[2] for t in trades if t[3] == 1)
+        # Win rate ponderee par volume (ratio du volume gagnant vs volume total)
+        # Plus fiable que le win rate simple car pondere par la taille des positions
+        winning_volume = sum(t[2] for t in trades if t[3] == 1)
         total_volume = sum(t[2] for t in trades)
-        win_rate_weighted = weighted_wins / total_volume if total_volume > 0 else 0
+        win_rate_weighted = winning_volume / total_volume if total_volume > 0 else 0
 
         # Sharpe ratio
         if len(pnls) > 1:

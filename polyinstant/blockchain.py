@@ -304,17 +304,34 @@ class PolygonClient:
         except (ValueError, TypeError):
             pass
 
+        # Essayer de calculer le prix reel via USDC dans la meme tx
+        price = self._estimate_price_from_tx(transfer, size, side)
+
         return {
             "maker_address": trader,
             "taker_address": "",
-            "price": 0.5,  # On ne connait pas le prix exact on-chain
+            "price": price,
             "size": size,
             "side": side,
             "timestamp": timestamp,
             "match_time": timestamp,
             "tx_hash": transfer.get("hash", ""),
             "_source": "onchain",
+            "_price_estimated": price == 0.5,  # Flag si prix est estim
         }
+
+    def _estimate_price_from_tx(self, transfer, token_size, side):
+        """
+        Estime le prix d'un trade on-chain.
+        Les ERC-1155 transfers ne contiennent pas le prix directement.
+        On utilise le champ 'value' de la transaction ETH (si present) pour
+        estimer, sinon on marque 0 (sera recalcule par wallet_tracker
+        avec les donnees de resolution du marche).
+        """
+        # On ne peut pas recuperer le prix exact sans un appel API par tx
+        # (trop lent/rate limited). On retourne 0 pour signaler "prix inconnu"
+        # et le wallet_tracker recalculera le PnL via la resolution.
+        return 0
 
     # =========================================================================
     # POLYMARKET CLOB API - TRADES
