@@ -148,14 +148,16 @@ class WalletTracker:
         3. Pour chaque trade, calcule win/loss et PnL
         4. Stocke en DB
         """
+        print(f"  Recuperation des marches resolus...", flush=True)
         resolved = self.chain.get_resolved_markets(limit=limit)
-        print(f"  [debug] Marches resolus recuperes: {len(resolved)}", flush=True)
+        print(f"  {len(resolved)} marches resolus trouves\n", flush=True)
         conn = self._conn()
         c = conn.cursor()
         indexed_count = 0
         markets_skipped_no_res = 0
         markets_skipped_dup = 0
         markets_skipped_no_trades = 0
+        markets_with_trades = 0
         wallet_updates = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0, "volume": 0, "trades": 0})
 
         for i, market in enumerate(resolved):
@@ -164,12 +166,13 @@ class WalletTracker:
             condition_id = market.get("conditionId", market.get("condition_id", ""))
             end_date_str = market.get("endDate", market.get("end_date", market.get("endDateIso", "")))
 
+            progress = f"[{i+1}/{len(resolved)}]"
+
             # Determiner le resultat
             resolution = self.chain.get_market_resolution(market)
             if not resolution:
                 markets_skipped_no_res += 1
-                if i < 3:
-                    print(f"  [debug] Marche sans resolution: {slug[:50]} keys={list(market.keys())[:8]}", flush=True)
+                print(f"  {progress} SKIP (pas de resolution) {slug[:45]}", flush=True)
                 continue
 
             # Verifier si deja indexe
@@ -177,19 +180,20 @@ class WalletTracker:
                 c.execute("SELECT COUNT(*) FROM wallet_trades WHERE market_slug=? AND market_resolved=1", (slug,))
                 if c.fetchone()[0] > 0:
                     markets_skipped_dup += 1
-                    continue  # Deja indexe
+                    print(f"  {progress} SKIP (deja indexe) {slug[:45]}", flush=True)
+                    continue
 
             # Collecter les trades
-            trades = self.chain.collect_all_trades_for_market(market)
+            print(f"  {progress} {slug[:45]} (res={resolution})...", flush=True)
+            trades = self.chain.collect_all_trades_for_market(market, verbose=True)
             if not trades:
                 markets_skipped_no_trades += 1
-                if i < 5:
-                    print(f"  [debug] Pas de trades: {slug[:40]} cond={condition_id[:20] if condition_id else 'N/A'}", flush=True)
+                print(f"    -> 0 trades trouves", flush=True)
                 continue
 
-            if i < 3:
-                source = trades[0].get("_source", "clob") if trades else "?"
-                print(f"  [debug] Marche OK: {slug[:40]} res={resolution} trades={len(trades)} src={source}", flush=True)
+            markets_with_trades += 1
+            source = trades[0].get("_source", "clob") if trades else "?"
+            print(f"    -> {len(trades)} trades (source: {source})", flush=True)
 
             # Parser end_date pour calculer le timing
             end_date = None
@@ -303,9 +307,17 @@ class WalletTracker:
         conn.commit()
         conn.close()
 
-        print(f"  [debug] Resume: resolus={len(resolved)} skip_no_res={markets_skipped_no_res} "
-              f"skip_dup={markets_skipped_dup} skip_no_trades={markets_skipped_no_trades} "
-              f"indexed={indexed_count}", flush=True)
+        print(f"\n  ╔══════════════════════════════════════╗", flush=True)
+        print(f"  ║  RESUME INDEXATION                    ║", flush=True)
+        print(f"  ╠══════════════════════════════════════╣", flush=True)
+        print(f"  ║  Resolus scannes:   {len(resolved):>5}              ║", flush=True)
+        print(f"  ║  Avec trades:       {markets_with_trades:>5}              ║", flush=True)
+        print(f"  ║  Trades indexes:    {indexed_count:>5}              ║", flush=True)
+        print(f"  ║  Wallets trouves:   {len(wallet_updates):>5}              ║", flush=True)
+        print(f"  ║  Skip (pas de res): {markets_skipped_no_res:>5}              ║", flush=True)
+        print(f"  ║  Skip (deja fait):  {markets_skipped_dup:>5}              ║", flush=True)
+        print(f"  ║  Skip (0 trades):   {markets_skipped_no_trades:>5}              ║", flush=True)
+        print(f"  ╚══════════════════════════════════════╝", flush=True)
 
         return {
             "markets_indexed": len(resolved) - markets_skipped_no_res - markets_skipped_dup - markets_skipped_no_trades if indexed_count > 0 else 0,

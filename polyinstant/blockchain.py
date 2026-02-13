@@ -40,6 +40,7 @@ class PolygonClient:
 
     CLOB_URL = "https://clob.polymarket.com"
     GAMMA_URL = "https://gamma-api.polymarket.com"
+    DATA_URL = "https://data-api.polymarket.com"
 
     def __init__(self, polygonscan_api_key=""):
         self.api_key = polygonscan_api_key
@@ -76,12 +77,12 @@ class PolygonClient:
     def _set_cache(self, key, data):
         self._cache[key] = (data, time.time())
 
-    def _get(self, url, params=None, retries=3):
+    def _get(self, url, params=None, retries=3, timeout=20):
         """GET avec retry et rate limiting."""
         self._rate_limit()
         for attempt in range(retries):
             try:
-                resp = self.session.get(url, params=params, timeout=15)
+                resp = self.session.get(url, params=params, timeout=timeout)
                 resp.raise_for_status()
                 return resp.json()
             except requests.RequestException:
@@ -98,7 +99,7 @@ class PolygonClient:
         params["chainid"] = self.CHAIN_ID
         if self.api_key:
             params["apikey"] = self.api_key
-        return self._get(self.ETHERSCAN_V2_URL, params=params)
+        return self._get(self.ETHERSCAN_V2_URL, params=params, timeout=30)
 
     def get_wallet_transactions(self, address, start_block=0, end_block=99999999, page=1, offset=100):
         """Recupere les transactions d'un wallet sur Polygon."""
@@ -208,10 +209,12 @@ class PolygonClient:
         self._set_cache(cache_key, all_transfers)
         return all_transfers
 
-    def get_onchain_trades_for_token(self, token_id, max_transfers=2000):
+    def get_onchain_trades_for_token(self, token_id, max_transfers=500):
         """
         Recupere les trades on-chain pour un token ID specifique.
-        Scanne les ERC-1155 transfers du CTF Exchange et filtre par tokenID.
+
+        Utilise le CTF Contract (conditional tokens ERC-1155) au lieu
+        du Exchange pour cibler directement les transfers de ce token.
 
         Retourne une liste de trades normalises.
         """
@@ -220,49 +223,38 @@ class PolygonClient:
 
         # Convertir token_id en decimal si c'est un hex
         token_id_dec = str(token_id)
-        token_id_hex = ""
         try:
             if token_id.startswith("0x"):
                 token_id_dec = str(int(token_id, 16))
-                token_id_hex = token_id.lower()
             else:
-                token_id_hex = hex(int(token_id)).lower()
                 token_id_dec = token_id
         except (ValueError, TypeError):
             pass
 
-        # Chercher dans les transfers du CTF Exchange
-        # On scan plusieurs pages pour trouver les transfers de ce token
+        # Strategie : scanner les ERC-1155 transfers du CTF Contract
+        # en filtrant par contractaddress (le token contract) pour reduire le volume
         trades = []
-        pages_needed = max(1, max_transfers // 1000)
 
-        for page in range(1, pages_needed + 1):
-            try:
-                result = self._etherscan({
-                    "module": "account",
-                    "action": "token1155tx",
-                    "address": self.CTF_EXCHANGE,
-                    "page": page,
-                    "offset": 1000,
-                    "sort": "desc",
-                })
-                transfers = result.get("result", [])
-                if not isinstance(transfers, list) or not transfers:
-                    break
-
+        try:
+            result = self._etherscan({
+                "module": "account",
+                "action": "token1155tx",
+                "contractaddress": self.CTF_CONTRACT,
+                "address": self.CTF_EXCHANGE,
+                "page": 1,
+                "offset": min(max_transfers, 1000),
+                "sort": "desc",
+            })
+            transfers = result.get("result", [])
+            if isinstance(transfers, list):
                 for tx in transfers:
                     tx_token = str(tx.get("tokenID", ""))
-                    # Comparer en decimal et hex
-                    if tx_token == token_id_dec or tx_token.lower() == token_id_hex:
+                    if tx_token == token_id_dec:
                         trade = self._transfer_to_trade(tx)
                         if trade:
                             trades.append(trade)
-
-                if len(transfers) < 1000:
-                    break
-            except Exception as e:
-                print(f"[debug] onchain scan page {page} error: {e}", file=sys.stderr)
-                break
+        except Exception as e:
+            print(f"    [onchain] Etherscan error: {e}", flush=True)
 
         return trades
 
@@ -448,15 +440,33 @@ class PolygonClient:
         """
         Determine le resultat d'un marche resolu.
         Retourne 'YES', 'NO', ou None si pas encore resolu.
-        """
-        # Verifier d'abord via le champ outcome/resolution (le plus fiable)
-        outcome = market.get("outcome", market.get("resolution", ""))
-        if outcome:
-            up = outcome.upper().strip()
-            if up in ("YES", "NO"):
-                return up
 
-        # Sinon verifier via les prix (un marche resolu = 1.0 / 0.0)
+        Essaie plusieurs champs car l'API Gamma n'est pas consistante.
+        """
+        # Champs possibles pour la resolution
+        for field in ("outcome", "resolution", "winningOutcome", "resolvedOutcome"):
+            val = market.get(field, "")
+            if val:
+                up = str(val).upper().strip()
+                if up in ("YES", "NO"):
+                    return up
+                # Certains marches ont "1" pour YES, "0" pour NO
+                if up in ("1", "TRUE"):
+                    return "YES"
+                if up in ("0", "FALSE"):
+                    return "NO"
+
+        # Check via les tokens (chaque token a un "winner" field)
+        tokens = market.get("tokens", [])
+        if isinstance(tokens, list):
+            for t in tokens:
+                winner = t.get("winner", t.get("winning", None))
+                if winner is True or winner == "true":
+                    outcome = t.get("outcome", "").upper()
+                    if outcome in ("YES", "NO"):
+                        return outcome
+
+        # Fallback : verifier via les prix (un marche resolu = 1.0 / 0.0)
         yes_price, no_price, _, _ = PolymarketClient.extract_prices(market)
         if yes_price is not None and no_price is not None:
             if yes_price >= 0.95:
@@ -470,7 +480,7 @@ class PolygonClient:
     # BULK DATA COLLECTION - Multi-strategie
     # =========================================================================
 
-    def collect_all_trades_for_market(self, market, max_pages=10):
+    def collect_all_trades_for_market(self, market, max_pages=10, verbose=True):
         """
         Collecte les trades pour un marche via multiple strategies :
         1. CLOB API (trades recents, marches actifs)
@@ -498,20 +508,38 @@ class PolygonClient:
                     if tid:
                         token_pairs.append((tid, outcome))
 
-        # ---- STRATEGIE 1 : CLOB API (rapide mais marches actifs uniquement) ----
+        if not token_pairs:
+            if verbose:
+                print(f"    [skip] Pas de token IDs pour {slug[:40]}", flush=True)
+            return []
+
+        # ---- STRATEGIE 1 : CLOB API (rapide) ----
         trades = self._try_clob_trades(token_pairs, condition_id)
         if trades:
+            if verbose:
+                print(f"    [clob] {len(trades)} trades", flush=True)
             return trades
 
-        # ---- STRATEGIE 2 : Gamma API activity ----
+        # ---- STRATEGIE 2 : Data API activity (historique des trades) ----
+        trades = self._try_data_api_activity(slug, token_pairs)
+        if trades:
+            if verbose:
+                print(f"    [data-api] {len(trades)} trades", flush=True)
+            return trades
+
+        # ---- STRATEGIE 3 : Gamma API activity (fallback) ----
         trades = self._try_gamma_activity(slug, token_pairs)
         if trades:
+            if verbose:
+                print(f"    [gamma] {len(trades)} trades", flush=True)
             return trades
 
-        # ---- STRATEGIE 3 : On-chain ERC-1155 via Etherscan V2 ----
+        # ---- STRATEGIE 4 : On-chain ERC-1155 via Etherscan V2 ----
         if self.api_key and token_pairs:
             trades = self._try_onchain_trades(token_pairs)
             if trades:
+                if verbose:
+                    print(f"    [onchain] {len(trades)} trades", flush=True)
                 return trades
 
         return []
@@ -538,8 +566,57 @@ class PolygonClient:
 
         return all_trades
 
+    def _try_data_api_activity(self, slug, token_pairs):
+        """Strategie 2 : trades via Polymarket Data API (historique complet)."""
+        if not slug:
+            return []
+
+        try:
+            # L'endpoint /activity du Data API retourne l'historique des trades
+            data = self._get(f"{self.DATA_URL}/activity", params={
+                "slug": slug,
+                "limit": 500,
+            }, timeout=15)
+
+            activities = data if isinstance(data, list) else (
+                data.get("data", data.get("activity", data.get("results", [])))
+                if isinstance(data, dict) else []
+            )
+
+            if not isinstance(activities, list) or not activities:
+                return []
+
+            # Construire un mapping token_id -> outcome
+            token_outcome_map = {}
+            for tid, outcome in token_pairs:
+                token_outcome_map[tid] = outcome
+
+            trades = []
+            for act in activities:
+                asset = act.get("asset_id", act.get("tokenId", act.get("asset", "")))
+                outcome = token_outcome_map.get(asset, act.get("outcome", "YES")).upper()
+
+                trade = {
+                    "maker_address": act.get("proxyWallet", act.get("address", act.get("user", ""))),
+                    "taker_address": "",
+                    "price": float(act.get("price", act.get("outcomePrice", 0))),
+                    "size": float(act.get("amount", act.get("size", act.get("value", 0)))),
+                    "side": act.get("side", act.get("type", "")),
+                    "timestamp": act.get("timestamp", act.get("createdAt", act.get("created_at", ""))),
+                    "_outcome": outcome,
+                    "_token_id": asset,
+                    "_source": "data_api",
+                }
+                if trade["maker_address"] and trade["size"] > 0:
+                    trades.append(trade)
+
+            return trades
+
+        except Exception:
+            return []
+
     def _try_gamma_activity(self, slug, token_pairs):
-        """Strategie 2 : activity feed via Gamma API."""
+        """Strategie 3 : activity feed via Gamma API (fallback)."""
         if not slug:
             return []
 
@@ -580,15 +657,17 @@ class PolygonClient:
             return []
 
     def _try_onchain_trades(self, token_pairs):
-        """Strategie 3 : trades on-chain via Etherscan V2 ERC-1155 transfers."""
+        """Strategie 4 : trades on-chain via Etherscan V2 ERC-1155 transfers."""
         all_trades = []
 
         for token_id, outcome in token_pairs:
-            onchain = self.get_onchain_trades_for_token(token_id, max_transfers=2000)
+            onchain = self.get_onchain_trades_for_token(token_id, max_transfers=500)
             for trade in onchain:
                 trade["_outcome"] = outcome
                 trade["_token_id"] = token_id
             all_trades.extend(onchain)
+            if all_trades:
+                break  # On a assez de data, pas besoin du 2eme token
 
         return all_trades
 
