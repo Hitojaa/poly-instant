@@ -577,7 +577,7 @@ def cmd_index(args):
 
     if result["trades_indexed"] > 0:
         print(f"\n  Scoring des wallets...")
-        scored = tracker.score_all_wallets(min_trades=5)
+        scored = tracker.score_all_wallets(min_trades=10)
         print(f"  {scored} wallets scores")
 
     # Stats globales
@@ -613,13 +613,14 @@ def cmd_leaderboard(args):
             f"{w['insider_score']:.0f}",
             f"{w['win_rate']:.0%}",
             f"{w['total_trades']}",
+            f"{w.get('markets_traded', 0)}",
             f"${w['estimated_pnl']:+,.0f}",
             f"${w['total_volume']:,.0f}",
             f"{w['sharpe']:.2f}",
         ])
 
     print(tabulate(rows, headers=[
-        "Rank", "Wallet", "Tier", "Score", "Insider", "WR", "Trades", "PnL", "Volume", "Sharpe"
+        "Rank", "Wallet", "Tier", "Score", "Insider", "WR", "Trades", "Mkts", "PnL", "Volume", "Sharpe"
     ], tablefmt="simple_outline"))
 
 

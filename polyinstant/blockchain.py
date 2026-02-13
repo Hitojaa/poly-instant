@@ -601,62 +601,72 @@ class PolygonClient:
         GET https://data-api.polymarket.com/trades?market=<conditionId>
         Retourne les trades avec proxyWallet, price, size, outcome, etc.
         Fonctionne meme pour les marches resolus.
+        Pagine automatiquement pour recuperer tous les trades.
         """
         if not condition_id:
             return []
 
+        # Construire un mapping token_id -> outcome
+        token_outcome_map = {}
+        for tid, outcome in token_pairs:
+            token_outcome_map[str(tid)] = outcome
+
+        all_trades = []
+        max_pages = 10  # Max 10 pages = ~1000 trades par marche
+
         try:
-            data = self._get(f"{self.DATA_URL}/trades", params={
-                "market": condition_id,
-            }, timeout=20)
+            for page in range(max_pages):
+                offset = page * 100
 
-            trade_list = data if isinstance(data, list) else (
-                data.get("data", data.get("trades", data.get("results", [])))
-                if isinstance(data, dict) else []
-            )
+                data = self._get(f"{self.DATA_URL}/trades", params={
+                    "market": condition_id,
+                    "offset": offset,
+                }, timeout=20)
 
-            if not isinstance(trade_list, list) or not trade_list:
-                return []
+                trade_list = data if isinstance(data, list) else (
+                    data.get("data", data.get("trades", data.get("results", [])))
+                    if isinstance(data, dict) else []
+                )
 
-            # Construire un mapping token_id -> outcome
-            token_outcome_map = {}
-            for tid, outcome in token_pairs:
-                token_outcome_map[str(tid)] = outcome
+                if not isinstance(trade_list, list) or not trade_list:
+                    break
 
-            trades = []
-            for t in trade_list:
-                asset = str(t.get("asset", t.get("asset_id", "")))
-                # L'outcome peut venir du mapping ou directement du champ "outcome"
-                outcome = token_outcome_map.get(asset, "")
-                if not outcome:
-                    outcome = (t.get("outcome", t.get("side", "YES"))).upper()
+                for t in trade_list:
+                    asset = str(t.get("asset", t.get("asset_id", "")))
+                    outcome = token_outcome_map.get(asset, "")
+                    if not outcome:
+                        outcome = (t.get("outcome", t.get("side", "YES"))).upper()
 
-                wallet = t.get("proxyWallet", t.get("user", t.get("maker_address", "")))
-                try:
-                    price = float(t.get("price", 0))
-                    size = float(t.get("size", t.get("amount", 0)))
-                except (ValueError, TypeError):
-                    continue
+                    wallet = t.get("proxyWallet", t.get("user", t.get("maker_address", "")))
+                    try:
+                        price = float(t.get("price", 0))
+                        size = float(t.get("size", t.get("amount", 0)))
+                    except (ValueError, TypeError):
+                        continue
 
-                trade = {
-                    "maker_address": wallet,
-                    "taker_address": "",
-                    "price": price,
-                    "size": size,
-                    "side": t.get("side", "BUY"),
-                    "timestamp": t.get("timestamp", ""),
-                    "_outcome": outcome,
-                    "_token_id": asset,
-                    "_source": "data_api",
-                    "tx_hash": t.get("transactionHash", ""),
-                }
-                if wallet and size > 0:
-                    trades.append(trade)
+                    trade = {
+                        "maker_address": wallet,
+                        "taker_address": "",
+                        "price": price,
+                        "size": size,
+                        "side": t.get("side", "BUY"),
+                        "timestamp": t.get("timestamp", ""),
+                        "_outcome": outcome,
+                        "_token_id": asset,
+                        "_source": "data_api",
+                        "tx_hash": t.get("transactionHash", ""),
+                    }
+                    if wallet and size > 0:
+                        all_trades.append(trade)
 
-            return trades
+                # Si on a recu moins de 100, c'est la derniere page
+                if len(trade_list) < 100:
+                    break
+
+            return all_trades
 
         except Exception:
-            return []
+            return all_trades  # Retourner ce qu'on a deja collecte
 
     def _try_gamma_activity(self, slug, token_pairs):
         """Strategie 3 : activity feed via Gamma API (fallback)."""

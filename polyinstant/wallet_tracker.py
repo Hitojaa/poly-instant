@@ -158,7 +158,7 @@ class WalletTracker:
         markets_skipped_dup = 0
         markets_skipped_no_trades = 0
         markets_with_trades = 0
-        wallet_updates = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0, "volume": 0, "trades": 0})
+        wallet_updates = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0, "volume": 0, "trades": 0, "markets": set()})
 
         for i, market in enumerate(resolved):
             slug = market.get("slug", market.get("market_slug", ""))
@@ -271,6 +271,7 @@ class WalletTracker:
                 wallet_updates[wallet]["trades"] += 1
                 wallet_updates[wallet]["volume"] += total_cost
                 wallet_updates[wallet]["pnl"] += pnl
+                wallet_updates[wallet]["markets"].add(slug)
                 if won:
                     wallet_updates[wallet]["wins"] += 1
                 else:
@@ -283,11 +284,12 @@ class WalletTracker:
         for address, stats in wallet_updates.items():
             total = stats["wins"] + stats["losses"]
             win_rate = stats["wins"] / total if total > 0 else 0
+            num_markets = len(stats["markets"])
 
             c.execute("""
                 INSERT INTO wallets (address, first_seen, last_seen, total_trades, total_wins,
                     total_losses, win_rate, total_volume, estimated_pnl, markets_traded)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(address) DO UPDATE SET
                     last_seen = ?,
                     total_trades = total_trades + ?,
@@ -296,12 +298,12 @@ class WalletTracker:
                     win_rate = CAST((total_wins + ?) AS REAL) / MAX(1, total_trades + ?),
                     total_volume = total_volume + ?,
                     estimated_pnl = estimated_pnl + ?,
-                    markets_traded = markets_traded + 1
+                    markets_traded = markets_traded + ?
             """, (
                 address, now, now, total, stats["wins"], stats["losses"],
-                win_rate, stats["volume"], stats["pnl"],
+                win_rate, stats["volume"], stats["pnl"], num_markets,
                 now, total, stats["wins"], stats["losses"],
-                stats["wins"], total, stats["volume"], stats["pnl"],
+                stats["wins"], total, stats["volume"], stats["pnl"], num_markets,
             ))
 
         conn.commit()
@@ -403,7 +405,13 @@ class WalletTracker:
         return scored
 
     def _compute_wallet_score(self, cursor, address):
-        """Calcule le score detaille d'un wallet."""
+        """
+        Calcule le score detaille d'un wallet.
+
+        Le score penalise les wallets avec peu de marches differents
+        (un mec qui gagne 100% sur 2 marches correles c'est pas un insider).
+        Un vrai smart trader a un bon win rate sur BEAUCOUP de marches differents.
+        """
         cursor.execute("""
             SELECT price, size, total_cost, trade_won, pnl,
                    time_before_resolution_min, market_slug
@@ -426,7 +434,6 @@ class WalletTracker:
         avg_pnl = total_pnl / total
 
         # Win rate ponderee par volume (ratio du volume gagnant vs volume total)
-        # Plus fiable que le win rate simple car pondere par la taille des positions
         winning_volume = sum(t[2] for t in trades if t[3] == 1)
         total_volume = sum(t[2] for t in trades)
         win_rate_weighted = winning_volume / total_volume if total_volume > 0 else 0
@@ -438,12 +445,10 @@ class WalletTracker:
         else:
             sharpe = 0
 
-        # Timing score : plus le timing est proche de la resolution et que ca gagne, plus c'est suspect
+        # Timing score
         timings_wins = [t[5] for t in trades if t[3] == 1 and t[5] > 0]
         if timings_wins:
             avg_timing = statistics.mean(timings_wins)
-            # Score : plus c'est court (en minutes), plus c'est fort
-            # < 60 min = 100, < 360 min = 70, < 1440 min = 40, > 1440 = 20
             if avg_timing < 60:
                 timing_score = 100
             elif avg_timing < 360:
@@ -456,7 +461,7 @@ class WalletTracker:
             avg_timing = 0
             timing_score = 0
 
-        # Consistency : ecart-type du win rate par marche
+        # Marches differents (diversite)
         markets = defaultdict(lambda: {"wins": 0, "total": 0})
         for t in trades:
             slug = t[6]
@@ -464,24 +469,40 @@ class WalletTracker:
             if t[3] == 1:
                 markets[slug]["wins"] += 1
 
+        num_markets = len(markets)
+
+        # Consistency : ecart-type du win rate par marche
         market_win_rates = [m["wins"] / m["total"] for m in markets.values() if m["total"] > 0]
         if len(market_win_rates) > 1:
             consistency = max(0, 100 - statistics.stdev(market_win_rates) * 100)
         else:
-            consistency = 50  # Pas assez de data
+            consistency = 30  # Un seul marche = faible confiance
 
         # Volume score (log scale)
         import math
         volume_score = min(100, math.log10(max(1, total_volume)) * 20)
 
+        # Diversite score : combien de marches differents
+        # C'est le filtre anti "100% sur 2 marches correles"
+        # 1 marche = 10, 3 = 30, 5 = 50, 10 = 75, 20+ = 100
+        if num_markets >= 20:
+            diversity_score = 100
+        elif num_markets >= 10:
+            diversity_score = 75
+        elif num_markets >= 5:
+            diversity_score = 50
+        elif num_markets >= 3:
+            diversity_score = 30
+        else:
+            diversity_score = 10
+
         # Insider score : combine timing + win rate + gros trades
-        # Un "insider" a un win rate eleve avec un timing serré et de grosses positions
         insider_score = 0
-        if win_rate >= 0.85 and total >= 10:
+        if win_rate >= 0.85 and total >= 10 and num_markets >= 3:
             insider_score += 40
-        elif win_rate >= 0.70 and total >= 10:
+        elif win_rate >= 0.70 and total >= 10 and num_markets >= 3:
             insider_score += 25
-        elif win_rate >= 0.60:
+        elif win_rate >= 0.60 and num_markets >= 2:
             insider_score += 10
 
         if timing_score >= 70:
@@ -499,16 +520,19 @@ class WalletTracker:
 
         insider_score = min(100, insider_score)
 
-        # Composite score
+        # Composite score avec diversite
+        # Poids : win_rate 20%, sharpe 10%, timing 15%, consistency 10%,
+        #         volume 10%, insider 20%, diversite 15%
         composite = (
-            win_rate * 25 +
-            min(1, sharpe / 3) * 15 +
-            (timing_score / 100) * 20 +
+            win_rate * 20 +
+            min(1, sharpe / 3) * 10 +
+            (timing_score / 100) * 15 +
             (consistency / 100) * 10 +
             (volume_score / 100) * 10 +
-            (insider_score / 100) * 20
+            (insider_score / 100) * 20 +
+            (diversity_score / 100) * 15
         )
-        composite = min(100, composite * 100 / 100)
+        composite = min(100, composite)
 
         # Tier
         if composite >= 85:
@@ -533,6 +557,8 @@ class WalletTracker:
             "consistency": round(consistency, 1),
             "volume_score": round(volume_score, 1),
             "insider_score": round(insider_score, 1),
+            "diversity_score": round(diversity_score, 1),
+            "num_markets": num_markets,
             "composite": round(composite, 1),
             "tier": tier,
             "total_trades": total,
@@ -543,7 +569,7 @@ class WalletTracker:
     # QUERIES - Leaderboard, profil wallet, etc.
     # =========================================================================
 
-    def get_leaderboard(self, limit=50, min_trades=5, sort_by="composite_score"):
+    def get_leaderboard(self, limit=50, min_trades=10, sort_by="composite_score"):
         """Retourne le leaderboard des meilleurs wallets."""
         conn = self._conn()
         c = conn.cursor()
@@ -556,7 +582,8 @@ class WalletTracker:
             SELECT w.address, w.total_trades, w.total_wins, w.total_losses,
                    w.win_rate, w.total_volume, w.estimated_pnl,
                    ws.composite_score, ws.insider_score, ws.tier,
-                   ws.sharpe_ratio, ws.avg_timing_score, ws.rank
+                   ws.sharpe_ratio, ws.avg_timing_score, ws.rank,
+                   w.markets_traded
             FROM wallets w
             JOIN wallet_scores ws ON w.address = ws.address
             WHERE w.total_trades >= ?
@@ -582,6 +609,7 @@ class WalletTracker:
                 "sharpe": r[10],
                 "timing_score": r[11],
                 "rank": r[12],
+                "markets_traded": r[13] or 0,
             }
             for r in rows
         ]
