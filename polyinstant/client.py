@@ -122,43 +122,67 @@ class PolymarketClient:
     def get_market_by_slug(self, slug):
         """
         Fetch a single market by slug.
-        Essaie d'abord le parametre slug exact, puis recherche texte.
+        Gere les marches simples ET les events (groupes de marches).
+        Pour les events, retourne le marche avec le plus de volume.
+
+        Retourne (market_dict, all_sub_markets_or_None).
         """
-        # Essai 1 : requete par slug exact
+        # Essai 1 : requete par slug exact sur /markets
         try:
             data = self._get(f"{self.GAMMA_URL}/markets", params={"slug": slug})
             markets = self._extract_list(data, "markets")
             if markets:
                 for m in markets:
                     if m.get("slug") == slug:
-                        return m
-                return markets[0]
+                        return m, None
+                return markets[0], None
         except Exception:
             pass
 
-        # Essai 2 : requete par slug via /events
+        # Essai 2 : requete par slug via /events (events multi-marches)
         try:
             data = self._get(f"{self.GAMMA_URL}/events", params={"slug": slug})
             events = self._extract_list(data, "events")
             for event in events:
                 event_markets = event.get("markets", [])
-                if isinstance(event_markets, list):
+                if isinstance(event_markets, list) and event_markets:
+                    # Chercher un match exact de slug dans les sous-marches
                     for m in event_markets:
                         if m.get("slug") == slug:
-                            return m
-                    if event_markets:
-                        return event_markets[0]
+                            return m, event_markets if len(event_markets) > 1 else None
+
+                    # Pas de match exact -> c'est un event, retourner le plus actif
+                    best = self._pick_best_market(event_markets)
+                    return best, event_markets
+
+                # L'event lui-meme est le marche
                 if event.get("slug") == slug:
-                    return event
+                    return event, None
         except Exception:
             pass
 
         # Essai 3 : recherche texte comme fallback
-        results = self.search_markets(slug, limit=5)
+        results = self.search_markets(slug, limit=10)
         for m in results:
             if m.get("slug") == slug:
-                return m
-        return results[0] if results else None
+                return m, None
+        return (results[0] if results else None), None
+
+    @staticmethod
+    def _pick_best_market(markets):
+        """Retourne le marche avec le plus de volume parmi une liste."""
+        best = None
+        best_vol = -1
+        for m in markets:
+            vol = float(m.get("volume", 0) or m.get("volume24hr", 0) or 0)
+            # Aussi prendre en compte les prix (ignorer les marches a 0%)
+            yp, _, _, _ = PolymarketClient.extract_prices(m)
+            if yp is not None and yp > 0.01 and yp < 0.99:
+                vol += 10000  # Bonus pour les marches avec de vrais prix
+            if vol > best_vol:
+                best_vol = vol
+                best = m
+        return best or markets[0]
 
     def search_markets(self, query, limit=20):
         """Search markets by keyword."""

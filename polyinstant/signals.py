@@ -179,8 +179,9 @@ class SignalEngine:
     def analyze_single(self, slug):
         """
         Analyse approfondie d'un seul marche avec tous les indicateurs.
+        Gere les events multi-marches (retourne sub_markets le cas echeant).
         """
-        market = self.client.get_market_by_slug(slug)
+        market, sub_markets = self.client.get_market_by_slug(slug)
         if not market:
             return None
 
@@ -217,4 +218,5 @@ class SignalEngine:
             "kelly_adjusted": kelly_adjusted,
             "ev_adjusted": ev_adjusted,
             "history_points": len(snapshots),
+            "sub_markets": sub_markets,
         }

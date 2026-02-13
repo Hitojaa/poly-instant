@@ -159,12 +159,33 @@ def cmd_analyze(args):
         return
 
     market = result["market"]
+    sub_markets = result.get("sub_markets")
 
     print(f"{'='*70}")
     print(f"  {market['question']}")
     print(f"{'='*70}\n")
 
-    print("  MARCHE")
+    # Si c'est un event multi-marches, afficher le tableau des candidats
+    if sub_markets and len(sub_markets) > 1:
+        from polyinstant.client import PolymarketClient as _PC
+        print("  CANDIDATS / SOUS-MARCHES")
+        print(f"  {'—'*40}")
+        # Trier par YES price decroissant
+        ranked = []
+        for sm in sub_markets:
+            yp, np_, _, _ = _PC.extract_prices(sm)
+            vol = float(sm.get("volume", 0) or sm.get("volume24hr", 0) or 0)
+            ranked.append((sm, yp or 0, vol))
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        for i, (sm, yp, vol) in enumerate(ranked, 1):
+            q = sm.get("question", sm.get("slug", "?"))
+            # Nettoyer la question pour extraire le nom
+            marker = " *" if sm.get("slug") == market.get("slug", "") else ""
+            print(f"  {i:>3}. {yp*100:>5.1f}%  ${vol:>12,.0f}  {q}{marker}")
+        print(f"\n  ({len(ranked)} marches dans cet event)")
+        print(f"  * = marche analyse ci-dessous\n")
+
+    print("  MARCHE ANALYSE")
     print(f"  {'—'*40}")
     print(f"  YES:           {market['yes_price']:.4f} ({market['yes_price']*100:.1f}%)")
     print(f"  NO:            {market['no_price']:.4f} ({market['no_price']*100:.1f}%)")
