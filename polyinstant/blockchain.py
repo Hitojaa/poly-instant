@@ -484,8 +484,9 @@ class PolygonClient:
         """
         Collecte les trades pour un marche via multiple strategies :
         1. CLOB API (trades recents, marches actifs)
-        2. Gamma API activity (historique via API Polymarket)
-        3. On-chain ERC-1155 transfers via Etherscan (historique permanent)
+        2. Data API (historique des trades)
+        3. Gamma API activity (fallback)
+        4. On-chain ERC-1155 transfers via Etherscan (historique permanent)
         """
         yes_price, no_price, yes_token_id, no_token_id = PolymarketClient.extract_prices(market)
         condition_id = market.get("conditionId", market.get("condition_id", ""))
@@ -508,39 +509,66 @@ class PolygonClient:
                     if tid:
                         token_pairs.append((tid, outcome))
 
+        if verbose:
+            print(f"    tokens: {len(token_pairs)} | cond: {condition_id[:20] if condition_id else 'N/A'}", flush=True)
+
         if not token_pairs:
             if verbose:
-                print(f"    [skip] Pas de token IDs pour {slug[:40]}", flush=True)
+                print(f"    [skip] Pas de token IDs", flush=True)
             return []
 
         # ---- STRATEGIE 1 : CLOB API (rapide) ----
-        trades = self._try_clob_trades(token_pairs, condition_id)
-        if trades:
+        try:
+            trades = self._try_clob_trades(token_pairs, condition_id)
+            if trades:
+                if verbose:
+                    print(f"    [clob] OK -> {len(trades)} trades", flush=True)
+                return trades
+            elif verbose:
+                print(f"    [clob] 0 trades", flush=True)
+        except Exception as e:
             if verbose:
-                print(f"    [clob] {len(trades)} trades", flush=True)
-            return trades
+                print(f"    [clob] ERREUR: {e}", flush=True)
 
-        # ---- STRATEGIE 2 : Data API activity (historique des trades) ----
-        trades = self._try_data_api_activity(slug, token_pairs)
-        if trades:
+        # ---- STRATEGIE 2 : Data API /trades (historique complet) ----
+        try:
+            trades = self._try_data_api_trades(condition_id, slug, token_pairs)
+            if trades:
+                if verbose:
+                    print(f"    [data-api] OK -> {len(trades)} trades", flush=True)
+                return trades
+            elif verbose:
+                print(f"    [data-api] 0 trades", flush=True)
+        except Exception as e:
             if verbose:
-                print(f"    [data-api] {len(trades)} trades", flush=True)
-            return trades
+                print(f"    [data-api] ERREUR: {e}", flush=True)
 
         # ---- STRATEGIE 3 : Gamma API activity (fallback) ----
-        trades = self._try_gamma_activity(slug, token_pairs)
-        if trades:
+        try:
+            trades = self._try_gamma_activity(slug, token_pairs)
+            if trades:
+                if verbose:
+                    print(f"    [gamma] OK -> {len(trades)} trades", flush=True)
+                return trades
+            elif verbose:
+                print(f"    [gamma] 0 trades", flush=True)
+        except Exception as e:
             if verbose:
-                print(f"    [gamma] {len(trades)} trades", flush=True)
-            return trades
+                print(f"    [gamma] ERREUR: {e}", flush=True)
 
         # ---- STRATEGIE 4 : On-chain ERC-1155 via Etherscan V2 ----
         if self.api_key and token_pairs:
-            trades = self._try_onchain_trades(token_pairs)
-            if trades:
+            try:
+                trades = self._try_onchain_trades(token_pairs)
+                if trades:
+                    if verbose:
+                        print(f"    [onchain] OK -> {len(trades)} trades", flush=True)
+                    return trades
+                elif verbose:
+                    print(f"    [onchain] 0 trades", flush=True)
+            except Exception as e:
                 if verbose:
-                    print(f"    [onchain] {len(trades)} trades", flush=True)
-                return trades
+                    print(f"    [onchain] ERREUR: {e}", flush=True)
 
         return []
 
@@ -566,48 +594,63 @@ class PolygonClient:
 
         return all_trades
 
-    def _try_data_api_activity(self, slug, token_pairs):
-        """Strategie 2 : trades via Polymarket Data API (historique complet)."""
-        if not slug:
+    def _try_data_api_trades(self, condition_id, slug, token_pairs):
+        """
+        Strategie 2 : trades via Polymarket Data API (historique complet).
+
+        GET https://data-api.polymarket.com/trades?market=<conditionId>
+        Retourne les trades avec proxyWallet, price, size, outcome, etc.
+        Fonctionne meme pour les marches resolus.
+        """
+        if not condition_id:
             return []
 
         try:
-            # L'endpoint /activity du Data API retourne l'historique des trades
-            data = self._get(f"{self.DATA_URL}/activity", params={
-                "slug": slug,
-                "limit": 500,
-            }, timeout=15)
+            data = self._get(f"{self.DATA_URL}/trades", params={
+                "market": condition_id,
+            }, timeout=20)
 
-            activities = data if isinstance(data, list) else (
-                data.get("data", data.get("activity", data.get("results", [])))
+            trade_list = data if isinstance(data, list) else (
+                data.get("data", data.get("trades", data.get("results", [])))
                 if isinstance(data, dict) else []
             )
 
-            if not isinstance(activities, list) or not activities:
+            if not isinstance(trade_list, list) or not trade_list:
                 return []
 
             # Construire un mapping token_id -> outcome
             token_outcome_map = {}
             for tid, outcome in token_pairs:
-                token_outcome_map[tid] = outcome
+                token_outcome_map[str(tid)] = outcome
 
             trades = []
-            for act in activities:
-                asset = act.get("asset_id", act.get("tokenId", act.get("asset", "")))
-                outcome = token_outcome_map.get(asset, act.get("outcome", "YES")).upper()
+            for t in trade_list:
+                asset = str(t.get("asset", t.get("asset_id", "")))
+                # L'outcome peut venir du mapping ou directement du champ "outcome"
+                outcome = token_outcome_map.get(asset, "")
+                if not outcome:
+                    outcome = (t.get("outcome", t.get("side", "YES"))).upper()
+
+                wallet = t.get("proxyWallet", t.get("user", t.get("maker_address", "")))
+                try:
+                    price = float(t.get("price", 0))
+                    size = float(t.get("size", t.get("amount", 0)))
+                except (ValueError, TypeError):
+                    continue
 
                 trade = {
-                    "maker_address": act.get("proxyWallet", act.get("address", act.get("user", ""))),
+                    "maker_address": wallet,
                     "taker_address": "",
-                    "price": float(act.get("price", act.get("outcomePrice", 0))),
-                    "size": float(act.get("amount", act.get("size", act.get("value", 0)))),
-                    "side": act.get("side", act.get("type", "")),
-                    "timestamp": act.get("timestamp", act.get("createdAt", act.get("created_at", ""))),
+                    "price": price,
+                    "size": size,
+                    "side": t.get("side", "BUY"),
+                    "timestamp": t.get("timestamp", ""),
                     "_outcome": outcome,
                     "_token_id": asset,
                     "_source": "data_api",
+                    "tx_hash": t.get("transactionHash", ""),
                 }
-                if trade["maker_address"] and trade["size"] > 0:
+                if wallet and size > 0:
                     trades.append(trade)
 
             return trades
