@@ -960,6 +960,61 @@ def cmd_watchlist(args):
         ], tablefmt="simple_outline"))
 
 
+def cmd_agent(args):
+    """Lance l'agent IA de recherche d'opportunites."""
+    _load_env()
+    notifier = _load_notifier()
+
+    from polyinstant.agent import MarketAgent
+
+    try:
+        agent = MarketAgent(notifier=notifier)
+    except (ValueError, ImportError) as e:
+        print(f"\n  [erreur] {e}")
+        return
+
+    # Parser les arguments
+    mode = args[0] if args else "scan"
+    limit = 100
+    min_volume = 5000
+    max_analyze = 15
+    interval = 300
+
+    for a in args[1:]:
+        if a.startswith("limit="):
+            limit = int(a.split("=")[1])
+        elif a.startswith("vol="):
+            min_volume = int(a.split("=")[1])
+        elif a.startswith("max="):
+            max_analyze = int(a.split("=")[1])
+        elif a.startswith("interval="):
+            interval = int(a.split("=")[1])
+
+    if mode == "scan" or mode == "once":
+        # Scan unique
+        opportunities = agent.scan(limit=limit, min_volume=min_volume, max_analyze=max_analyze)
+        agent.format_results(opportunities)
+        agent.notify_opportunities(opportunities)
+
+    elif mode == "live":
+        # Mode continu
+        agent.run(
+            interval=interval,
+            limit=limit,
+            min_volume=min_volume,
+            max_analyze=max_analyze,
+        )
+
+    else:
+        print("Usage: python main.py agent [scan|live] [limit=N] [vol=N] [max=N] [interval=N]")
+        print("  scan     - Scan unique (defaut)")
+        print("  live     - Mode continu")
+        print("  limit=N  - Nombre de marches a fetcher (defaut: 100)")
+        print("  vol=N    - Volume minimum en $ (defaut: 5000)")
+        print("  max=N    - Max marches a analyser avec l'IA (defaut: 15)")
+        print("  interval=N - Secondes entre scans en mode live (defaut: 300)")
+
+
 def cmd_copytrade(args):
     """Lance le copy-trading en temps reel."""
     interval = int(args[0]) if args else 60
@@ -999,6 +1054,7 @@ COMMANDS = {
     "network": cmd_network,
     "watchlist": cmd_watchlist,
     "copytrade": cmd_copytrade,
+    "agent": cmd_agent,
 }
 
 
@@ -1042,7 +1098,13 @@ def main():
 ║                        flow <slug>                                     ║
 ║  copytrade [sec]       Copy-trading en temps reel                      ║
 ║                                                                       ║
+║  AI AGENT                                                             ║
+║  ────────                                                             ║
+║  agent [scan|live]     Agent IA : recherche web + analyse Claude      ║
+║    Options: limit=N vol=N max=N interval=N                            ║
+║                                                                       ║
 ║  CONFIG (.env) :                                                      ║
+║  ANTHROPIC_API_KEY  (requis pour agent IA)                            ║
 ║  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  (notifications)               ║
 ║  POLYGONSCAN_API_KEY  (analyse on-chain, gratuit sur etherscan.io)     ║
 ║                                                                       ║
